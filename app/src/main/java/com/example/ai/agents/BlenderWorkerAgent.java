@@ -54,8 +54,13 @@ public class BlenderWorkerAgent {
     public static WorkerScripts wrapDynamicScript(String dynamicScript, AIDirectorSpec spec, String assetId) {
         VynaraLogger.system("BlenderWorkerAgent: Wrapping dynamic AI script for asset [" + assetId + "]");
 
-        String w1 = (dynamicScript != null && !dynamicScript.trim().isEmpty()) 
-                ? dynamicScript.trim() 
+        // Strip any premature export calls from dynamic script so model.glb is never exported before the road!
+        String safeDynamicScript = (dynamicScript != null) 
+                ? dynamicScript.replaceAll("(?m)^\\s*bpy\\.ops\\.export_scene\\.gltf\\([^)]*\\)", "# Stripped premature export")
+                : "";
+
+        String w1 = (!safeDynamicScript.trim().isEmpty()) 
+                ? safeDynamicScript.trim() 
                 : "# Note: Dynamic asset generation synthesized in master pipeline.\n";
         String w2 = buildWorker2DetailsScript(spec);
         String w3 = buildWorker3LightingAndRenderScript(spec);
@@ -166,14 +171,14 @@ public class BlenderWorkerAgent {
     /**
      * Dynamically builds Worker 1 (Structure) using real procedural shaping, subdivision,
      * and boolean carving, or loads an uploaded 3D asset (.fbx, .glb, .obj, .gltf),
-     * normalizing the car assembly scale to exactly 4.5m total length (Rule 1).
+     * directly baking the scale normalization to 4.5m and 180-deg forward heading to mesh vertices.
      */
     private static String buildWorker1StructureScript(String promptOrCode, AIDirectorSpec spec) {
         if (promptOrCode == null) return "";
 
-        // If Gemini synthesized code, preserve and return directly
+        // If Gemini synthesized code, preserve and return directly (after stripping premature exports)
         if (promptOrCode.contains("import bpy") || promptOrCode.contains("bpy.ops") || promptOrCode.contains("bpy.data")) {
-            return promptOrCode.trim();
+            return promptOrCode.replaceAll("(?m)^\\s*bpy\\.ops\\.export_scene\\.gltf\\([^)]*\\)", "# Stripped premature export").trim();
         }
 
         String p = promptOrCode.toLowerCase();
@@ -233,29 +238,27 @@ public class BlenderWorkerAgent {
         sb.append("    bpy.ops.wm.obj_import(filepath=obj_path)\n");
         sb.append("    imported_mesh_list = [o for o in bpy.data.objects if o not in _b4 and o.type == 'MESH']\n\n");
 
-        sb.append("# RULE 1: CAR SCALE NORMALIZATION ACROSS COMBINED BOUNDING BOX\n");
+        sb.append("# RULE 1: DIRECT BAKED CAR SCALE NORMALIZATION (4.5m length, centered, 180-deg yaw forward)\n");
         sb.append("if imported_mesh_list:\n");
-        sb.append("    _min_x, _min_y, _min_z = float('inf'), float('inf'), float('inf')\n");
-        sb.append("    _max_x, _max_y, _max_z = float('-inf'), float('-inf'), float('-inf')\n");
-        sb.append("    for _m in imported_mesh_list:\n");
-        sb.append("        for _corner in _m.bound_box:\n");
-        sb.append("            _w = _m.matrix_world @ mathutils.Vector(_corner)\n");
-        sb.append("            _min_x = min(_min_x, _w.x); _max_x = max(_max_x, _w.x)\n");
-        sb.append("            _min_y = min(_min_y, _w.y); _max_y = max(_max_y, _w.y)\n");
-        sb.append("            _min_z = min(_min_z, _w.z); _max_z = max(_max_z, _w.z)\n");
-        sb.append("    _dim_x = _max_x - _min_x; _dim_y = _max_y - _min_y\n");
-        sb.append("    _total_len = max(_dim_x, _dim_y)\n");
+        sb.append("    _min_x = min((_m.matrix_world @ mathutils.Vector(c)).x for _m in imported_mesh_list for c in _m.bound_box)\n");
+        sb.append("    _max_x = max((_m.matrix_world @ mathutils.Vector(c)).x for _m in imported_mesh_list for c in _m.bound_box)\n");
+        sb.append("    _min_y = min((_m.matrix_world @ mathutils.Vector(c)).y for _m in imported_mesh_list for c in _m.bound_box)\n");
+        sb.append("    _max_y = max((_m.matrix_world @ mathutils.Vector(c)).y for _m in imported_mesh_list for c in _m.bound_box)\n");
+        sb.append("    _min_z = min((_m.matrix_world @ mathutils.Vector(c)).z for _m in imported_mesh_list for c in _m.bound_box)\n");
+        sb.append("    _max_z = max((_m.matrix_world @ mathutils.Vector(c)).z for _m in imported_mesh_list for c in _m.bound_box)\n");
+        sb.append("    _total_len = max(_max_x - _min_x, _max_y - _min_y)\n");
         sb.append("    if _total_len > 0.001:\n");
         sb.append("        _scale_factor = 4.5 / _total_len\n");
-        sb.append("        _cx = (_min_x + _max_x) * 0.5; _cy = (_min_y + _max_y) * 0.5; _bz = _min_z\n");
-        sb.append("        print(f'Normalizing imported car assembly length from {_total_len:.3f}m to 4.5m')\n");
+        sb.append("        _cx = (_min_x + _max_x) * 0.5; _cy = (_min_y + _max_y) * 0.5; _cz = _min_z\n");
+        sb.append("        print(f'Directly baking imported car assembly length from {_total_len:.3f}m to 4.5m')\n");
         sb.append("        for _m in imported_mesh_list:\n");
         sb.append("            _m.location.x = (_m.location.x - _cx) * _scale_factor\n");
         sb.append("            _m.location.y = (_m.location.y - _cy) * _scale_factor\n");
-        sb.append("            _m.location.z = (_m.location.z - _bz) * _scale_factor\n");
+        sb.append("            _m.location.z = (_m.location.z - _cz) * _scale_factor\n");
         sb.append("            _m.scale = (_m.scale.x * _scale_factor, _m.scale.y * _scale_factor, _m.scale.z * _scale_factor)\n");
+        sb.append("            _m.rotation_euler.z += math.pi\n");
         sb.append("            bpy.context.view_layer.objects.active = _m\n");
-        sb.append("            bpy.ops.object.transform_apply(location=True, rotation=False, scale=True)\n");
+        sb.append("            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)\n");
         sb.append("    imported_car = imported_mesh_list[0]\n\n");
 
         boolean isVehicle = p.contains("car") || p.contains("vehicle") || p.contains("suv") 
@@ -377,7 +380,7 @@ public class BlenderWorkerAgent {
 
     /**
      * Builds Worker 2: Details, Road Infrastructure (14m x 250m at Z=-0.01), Center Dashes (Z=0.005 UP),
-     * Master Root Empty Parenting, 180-deg Forward Yaw, Lane Placement (X=0, Y=15, Z=0), and Baked Driving Animation.
+     * Model_Root Assembly parenting with clean unit scale, and Driving Animation (Y: 15 -> 95m).
      */
     private static String buildWorker2DetailsScript(AIDirectorSpec spec) {
         StringBuilder sb = new StringBuilder();
@@ -439,7 +442,7 @@ public class BlenderWorkerAgent {
             sb.append("bpy.ops.object.transform_apply(scale=True)\n");
             sb.append("guardrail.data.materials.append(mat_guard)\n\n");
 
-            sb.append("# RULES 3 & 4: MASTER ROOT EMPTY PARENTING, FORWARD ORIENTATION & DRIVING ANIMATION\n");
+            sb.append("# RULES 3 & 4: MASTER ROOT PARENTING AT CLEAN (1,1,1) UNIT SCALE & DRIVING ANIMATION\n");
             sb.append("_root = bpy.data.objects.get('Model_Root')\n");
             sb.append("if not _root:\n");
             sb.append("    _root = bpy.data.objects.new('Model_Root', None)\n");
@@ -453,18 +456,14 @@ public class BlenderWorkerAgent {
 
             sb.append("_env_filter = ['road', 'highway', 'asphalt', 'ground', 'stripe', 'lane', 'marking', 'dash', 'guardrail', 'barrier', 'curb', 'sidewalk', 'terrain', 'plane', 'sky', 'light', 'lamp', 'camera']\n");
             sb.append("_car_objs = [o for o in bpy.data.objects if o.type == 'MESH' and not any(k in o.name.lower() for k in _env_filter)]\n");
-            sb.append("# 1. Clear residual animation data on child meshes to prevent double-transform shaking\n");
+            sb.append("# 1. Clear residual animation on individual meshes to prevent transform fighting\n");
             sb.append("for _co in _car_objs:\n");
             sb.append("    if _co.animation_data:\n");
             sb.append("        _co.animation_data_clear()\n");
             sb.append("    _co.parent = _root\n");
             sb.append("    _co.matrix_parent_inverse = _root.matrix_world.inverted()\n\n");
 
-            sb.append("# 2. Auto-Heading: Standard FBX automotive assets face -Y. Rotate 180 deg around Z to face forward down highway (+Y)\n");
-            sb.append("_root.rotation_euler.z = math.pi\n");
-            sb.append("bpy.context.view_layer.update()\n\n");
-
-            sb.append("# 3. Placement & Driving: Start at Y=15.0 with open road ahead, drive to Y=95.0, centered at X=0, flush at Z=0\n");
+            sb.append("# 2. Driving Animation: Start at Y=15.0 with open runway, drive to Y=95.0\n");
             sb.append("bpy.context.scene.frame_start = 1\n");
             sb.append("bpy.context.scene.frame_end = 60\n");
             sb.append("_root.location = (0.0, 15.0, 0.0)\n");
@@ -475,7 +474,7 @@ public class BlenderWorkerAgent {
             sb.append("    for _fc in _root.animation_data.action.fcurves:\n");
             sb.append("        for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n\n");
 
-            sb.append("# 4. Baked Wheel Spin: Keyframe frame-by-frame (1->60) to eliminate quaternion slerp jitter\n");
+            sb.append("# 3. Baked Wheel Spin: Keyframe frame-by-frame (1->60) to eliminate quaternion slerp jitter\n");
             sb.append("_wheel_keys = ['wheel', 'tire', 'rim', 'tyre', 'disc']\n");
             sb.append("_wheels = [o for o in _car_objs if any(wk in o.name.lower() for wk in _wheel_keys)]\n");
             sb.append("for _wo in _wheels:\n");
@@ -536,7 +535,7 @@ public class BlenderWorkerAgent {
         sb.append("    bpy.context.scene.camera = cam_obj\n\n");
 
         if (isVehicle) {
-            sb.append("    # Move camera in world-meters along Y (unparented to avoid 1000x downscale inside chassis)\n");
+            sb.append("    # Move camera in world-meters along Y (unparented to avoid downscale inside chassis)\n");
             sb.append("    _root = bpy.data.objects.get('Model_Root')\n");
             sb.append("    cam_obj.parent = None\n");
             sb.append("    cam_obj.scale = (1.0, 1.0, 1.0)\n");
@@ -567,7 +566,6 @@ public class BlenderWorkerAgent {
         sb.append("try:\n");
         sb.append("    sun_data = bpy.data.lights.new('KeySun', type='SUN')\n");
         sb.append("    sun_data.energy = ").append(sunIntensity).append("\n");
-        sb.append("    sun_data.color = (1.0, 0.98, 0.92)\n");
         sb.append("    sun_obj = bpy.data.objects.new('KeySunLight', sun_data)\n");
         sb.append("    bpy.context.collection.objects.link(sun_obj)\n");
         sb.append("    sun_obj.rotation_euler = (math.radians(").append(sunElevation).append("), 0, math.radians(").append(sunAzimuth).append("))\n");
