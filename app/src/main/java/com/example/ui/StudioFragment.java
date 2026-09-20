@@ -224,7 +224,7 @@ public class StudioFragment extends Fragment {
             });
         }
 
-        // Universal animation loop: updates scrubber, time text, and node transform keyframes across animated scenes
+        // Universal animation loop: updates scrubber, time text, and node transform keyframes across entire hierarchy
         animRunnable = new Runnable() {
             @Override
             public void run() {
@@ -242,12 +242,12 @@ public class StudioFragment extends Fragment {
                         seekbarTimeline.setProgress(progress);
                     }
 
-                    // Update node transform animation tracks (car driving, wheel rotation, motion paths)
+                    // Update node transform animation tracks across the entire flat hierarchy (car driving, wheel rotation, motion paths)
                     Scene activeScene = (engine != null && engine.getSceneManager() != null) 
                             ? engine.getSceneManager().getActiveScene() : null;
                     if (activeScene != null) {
                         synchronized (activeScene) {
-                            for (SceneObject obj : activeScene.getObjects()) {
+                            for (SceneObject obj : activeScene.getFlatObjectList()) {
                                 if (obj != null) {
                                     obj.updateAnimation(currentPlaybackTime);
                                 }
@@ -317,12 +317,12 @@ public class StudioFragment extends Fragment {
                     }
                     
                     if (fromUser) {
-                        // Seek node animations on user timeline scrub
+                        // Seek node animations across all flat scene nodes on user timeline scrub
                         Scene activeScene = (engine != null && engine.getSceneManager() != null) 
                                 ? engine.getSceneManager().getActiveScene() : null;
                         if (activeScene != null) {
                             synchronized (activeScene) {
-                                for (SceneObject obj : activeScene.getObjects()) {
+                                for (SceneObject obj : activeScene.getFlatObjectList()) {
                                     if (obj != null) {
                                         obj.updateAnimation(seconds);
                                     }
@@ -558,51 +558,49 @@ public class StudioFragment extends Fragment {
             flatList = new ArrayList<>(activeScene.getFlatObjectList());
         }
 
+        // Priority 1: Focus on Vehicle or Hero subject (ignoring the 250m long road geometry)
         float minX = Float.POSITIVE_INFINITY, minY = Float.POSITIVE_INFINITY, minZ = Float.POSITIVE_INFINITY;
         float maxX = Float.NEGATIVE_INFINITY, maxY = Float.NEGATIVE_INFINITY, maxZ = Float.NEGATIVE_INFINITY;
         boolean hasSubject = false;
 
         for (SceneObject obj : flatList) {
             if (obj == null || !obj.isVisible() || obj.getMesh() == null || obj.getMesh().getVertices() == null) continue;
+            
+            String nameLower = obj.getName() != null ? obj.getName().toLowerCase(Locale.US) : "";
+            // Ignore environment planes, long highway road, and guardrails when computing hero subject focus
+            if (nameLower.contains("road") || nameLower.contains("highway") || nameLower.contains("guardrail") 
+                    || nameLower.contains("asphalt") || nameLower.contains("stripe") || nameLower.contains("ground")) {
+                continue;
+            }
+
             float[] verts = obj.getMesh().getVertices();
             if (verts.length == 0) continue;
 
             float[] worldMat = getAbsoluteWorldMatrix(obj);
             if (worldMat == null) continue;
 
-            float oMinX = Float.POSITIVE_INFINITY, oMaxX = Float.NEGATIVE_INFINITY;
-            float oMinZ = Float.POSITIVE_INFINITY, oMaxZ = Float.NEGATIVE_INFINITY;
-
-            for (int v = 0; v < verts.length; v += 3) {
-                float vx = worldMat[0] * verts[v] + worldMat[4] * verts[v + 1] + worldMat[8] * verts[v + 2] + worldMat[12];
-                float vz = worldMat[2] * verts[v] + worldMat[6] * verts[v + 1] + worldMat[10] * verts[v + 2] + worldMat[14];
-                if (vx < oMinX) oMinX = vx;
-                if (vx > oMaxX) oMaxX = vx;
-                if (vz < oMinZ) oMinZ = vz;
-                if (vz > oMaxZ) oMaxZ = vz;
-            }
-
-            float spanX = Math.abs(oMaxX - oMinX);
-            float spanZ = Math.abs(oMaxZ - oMinZ);
-
-            if (spanX > 80.0f || spanZ > 80.0f) {
-                continue;
-            }
-
             for (int v = 0; v < verts.length; v += 3) {
                 float vx = worldMat[0] * verts[v] + worldMat[4] * verts[v + 1] + worldMat[8] * verts[v + 2] + worldMat[12];
                 float vy = worldMat[1] * verts[v] + worldMat[5] * verts[v + 1] + worldMat[9] * verts[v + 2] + worldMat[13];
                 float vz = worldMat[2] * verts[v] + worldMat[6] * verts[v + 1] + worldMat[10] * verts[v + 2] + worldMat[14];
-                if (vx < minX) minX = vx;
-                if (vy < minY) minY = vy;
-                if (vz < minZ) minZ = vz;
-                if (vx > maxX) maxX = vx;
-                if (vy > maxY) maxY = vy;
-                if (vz > maxZ) maxZ = vz;
+
+                if (!Float.isNaN(vx) && !Float.isInfinite(vx)) {
+                    if (vx < minX) minX = vx;
+                    if (vx > maxX) maxX = vx;
+                }
+                if (!Float.isNaN(vy) && !Float.isInfinite(vy)) {
+                    if (vy < minY) minY = vy;
+                    if (vy > maxY) maxY = vy;
+                }
+                if (!Float.isNaN(vz) && !Float.isInfinite(vz)) {
+                    if (vz < minZ) minZ = vz;
+                    if (vz > maxZ) maxZ = vz;
+                }
                 hasSubject = true;
             }
         }
 
+        // Fallback: If no distinct subject is found, frame all objects
         if (!hasSubject) {
             for (SceneObject obj : flatList) {
                 if (obj == null || !obj.isVisible() || obj.getMesh() == null || obj.getMesh().getVertices() == null) continue;
@@ -614,12 +612,19 @@ public class StudioFragment extends Fragment {
                     float vx = worldMat[0] * verts[v] + worldMat[4] * verts[v + 1] + worldMat[8] * verts[v + 2] + worldMat[12];
                     float vy = worldMat[1] * verts[v] + worldMat[5] * verts[v + 1] + worldMat[9] * verts[v + 2] + worldMat[13];
                     float vz = worldMat[2] * verts[v] + worldMat[6] * verts[v + 1] + worldMat[10] * verts[v + 2] + worldMat[14];
-                    if (vx < minX) minX = vx;
-                    if (vy < minY) minY = vy;
-                    if (vz < minZ) minZ = vz;
-                    if (vx > maxX) maxX = vx;
-                    if (vy > maxY) maxY = vy;
-                    if (vz > maxZ) maxZ = vz;
+
+                    if (!Float.isNaN(vx) && !Float.isInfinite(vx)) {
+                        if (vx < minX) minX = vx;
+                        if (vx > maxX) maxX = vx;
+                    }
+                    if (!Float.isNaN(vy) && !Float.isInfinite(vy)) {
+                        if (vy < minY) minY = vy;
+                        if (vy > maxY) maxY = vy;
+                    }
+                    if (!Float.isNaN(vz) && !Float.isInfinite(vz)) {
+                        if (vz < minZ) minZ = vz;
+                        if (vz > maxZ) maxZ = vz;
+                    }
                     hasSubject = true;
                 }
             }
