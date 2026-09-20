@@ -383,17 +383,30 @@ public class AIProductionController {
      * Injects the raw user script cleanly into the task graph.
      * Marks execution parameters with is_raw_script=true, isRawUserScript=true, and pipelineMode=OPTION_A,
      * ensuring the cloud worker does not force vehicle road generators or 60-frame animation loops.
+     * Preserves script content in both Operation parameters and Task parameters.
      */
     private void injectCustomScriptIntoPlan(ProductionPlan plan, String scriptText) {
         if (plan == null || plan.getTaskGraph() == null || scriptText == null || scriptText.isEmpty()) return;
         for (TaskNode node : plan.getTaskGraph().getAllNodes()) {
             if (node.getOperation() != null && "blender.cloud_generate".equals(node.getOperation().getToolId())) {
+                // Configure ToolOperation parameters
                 node.getOperation().setParam("bpyScript", scriptText);
+                node.getOperation().setParam("blender_script", scriptText);
                 node.getOperation().setParam("is_raw_script", true);
                 node.getOperation().setParam("isRawUserScript", true);
                 node.getOperation().setParam("pipelineMode", AIPipelineMode.PROCEDURAL_PYTHON.getId());
                 node.getOperation().setParam("agenticMode", false);
                 node.getOperation().setParam("interactiveCheckpoint", false);
+
+                // Mirror parameters directly on TaskNode so self-correction and failure interceptors have full context
+                node.addParameter("bpyScript", scriptText);
+                node.addParameter("blender_script", scriptText);
+                node.addParameter("is_raw_script", true);
+                node.addParameter("isRawUserScript", true);
+                node.addParameter("pipelineMode", AIPipelineMode.PROCEDURAL_PYTHON.getId());
+                node.addParameter("agenticMode", false);
+                node.addParameter("interactiveCheckpoint", false);
+
                 node.setTitle("Execute Procedural Python Script");
                 node.setDescription("Executing standalone procedural Blender script without scene injection");
                 VynaraLogger.system("AIProductionController: Injected raw procedural Python script into task [" + node.getId() + "] (is_raw_script=true)");
