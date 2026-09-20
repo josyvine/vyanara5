@@ -260,20 +260,21 @@ public class AICorrector {
                 "   - Lights must use `bpy.ops.object.light_add(type=...)`. Valid types: ('POINT', 'SUN', 'SPOT', 'AREA').\n" +
                 "   - Texture types in `bpy.data.textures.new(...)` MUST be one of: ('NONE', 'BLEND', 'CLOUDS', 'DISTORTED_NOISE', 'IMAGE', 'MAGIC', 'MARBLE', 'MUSGRAVE', 'NOISE', 'STUCCI', 'VORONOI', 'WOOD').\n" +
                 "   - Principled BSDF socket names must conform to Blender 4.2+ ('Transmission Weight', 'Roughness', 'Metallic', 'Specular IOR Level').\n" +
-                "   - Ensure `bpy.ops.export_scene.gltf(filepath='output/model.glb', export_format='GLB', export_apply=False, export_skins=True, export_animations=True)` runs at the very end.\n" +
-                "6. VEHICLE SPATIAL & ANIMATION MANDATES (STRICT 5 RULES):\n" +
+                "6. VEHICLE SPATIAL, HIGHWAY ROAD & ANIMATION MANDATES (STRICT 5 RULES):\n" +
                 "   - RULE 1: CAR SCALE NORMALIZATION: Imported cars are modeled in oversized millimeter/centimeter units. Calculate combined bounding box across all imported car sub-meshes. Scale the entire assembly down so its total length is exactly real-world automotive size: 4.5 meters. Apply all scale transforms.\n" +
-                "   - RULE 2: ROAD SCALE & ALIGNMENT: Build a realistic multi-lane asphalt highway matching the 4.5m car: 14 meters wide and at least 250 meters long, flat on ground at Z=0.0 running straight along Y-axis with rotation (0,0,0). Add center lane dashes at Z=0.005 with normal pointing straight UP (0,0,1).\n" +
+                "   - RULE 2: ROAD SCALE & ALIGNMENT: Build a realistic multi-lane asphalt highway matching the 4.5m car: 14 meters wide and at least 250 meters long, flat on ground at Z=0.0 running straight along Y-axis with rotation (0,0,0). Add center lane dashes at Z=0.005 with normal pointing straight UP (0,0,1). NEVER OMIT THE ROAD FROM THE SCENE.\n" +
                 "   - RULE 3: PLACING CAR ON ROAD: Center car in driving lane at X=0.0. Snap bottom-most point of tires flush on top of road at Z=0.0. Start car near beginning of road at Y=5.0.\n" +
-                "   - RULE 4: PARENTING & DRIVING ANIMATION: Create master Empty 'Model_Root' at car base. Parent all imported car sub-meshes to 'Model_Root' keeping relative assembly offsets intact. Animate 'Model_Root' driving along Y-axis from Y=5.0 at frame 1 to Y=80.0 at frame 60 using location keyframes. Find all wheel/tire meshes and animate them spinning around their axles proportional to driving speed.\n" +
-                "   - RULE 5: CINEMATIC CAMERA: Place camera tracking car from a low, dramatic, three-quarter front angle. Keyframe camera moving with car down highway to create a high-speed cinematic sequence.\n" +
-                "7. COMPLETE SCENE: Do not return partial snippets, comments like `# ... rest of code`, or placeholders. Return the full complete scene script.";
+                "   - RULE 4: PARENTING & DRIVING ANIMATION: Create master Empty 'Model_Root' at car base. Parent all imported car sub-meshes to 'Model_Root' keeping relative assembly offsets intact. Animate 'Model_Root' driving along Y-axis from Y=5.0 at frame 1 to Y=80.0 at frame 60 using location keyframes. Find all wheel/tire meshes using clean syntax `_wheel_keys = ['wheel', 'tire', 'rim', 'tyre', 'disc']` and animate them spinning around their axles proportional to driving speed.\n" +
+                "   - RULE 5: CINEMATIC CAMERA & LIGHTING: Parent camera to 'Model_Root' at offset `(-3.8, -7.0, 2.2)` with a `TRACK_TO` constraint targeting 'Model_Root'. Add bright Sun light (energy >= 5.0) and world sky background radiance (strength >= 1.2) so the scene is NEVER pitch black.\n" +
+                "7. MANDATORY COMPLETE SCENE EXPORT:\n" +
+                "   - You MUST ensure `bpy.ops.export_scene.gltf(filepath='output/model.glb', export_format='GLB', export_apply=False, export_skins=True, export_animations=True, export_materials='EXPORT')` is placed at the VERY END of the script so BOTH the car and the highway road are exported into 'output/model.glb'.\n" +
+                "   - Do not return partial snippets or placeholders like `# ... rest of code`. Return the full complete scene script.";
     }
 
     private String buildBlenderRepairUserPrompt(String userPrompt, String failedScript, String errorTraceback) {
         String safePrompt = (userPrompt != null && !userPrompt.trim().isEmpty())
                 ? userPrompt
-                : "Custom user-supplied Blender Python script (Prompt omitted by user). Fix syntax and API errors while preserving all 3D mesh objects and scene composition.";
+                : "Custom user-supplied Blender Python script (Prompt omitted by user). Fix syntax and API errors while preserving all 3D mesh objects, highway road, and scene composition.";
 
         StringBuilder sb = new StringBuilder();
         sb.append("=== WHAT WAS BEING BUILT (USER PROMPT / GOAL) ===\n")
@@ -293,14 +294,25 @@ public class AICorrector {
                 sb.append("HEALING DIRECTIVE FOR COLOR LOOK:\n")
                   .append("- Replace `scene.view_settings.look = 'High Contrast'` with `scene.view_settings.look = 'AgX - High Contrast'`.\n\n");
             }
+            if (errorTraceback.toLowerCase().contains("syntaxerror") || errorTraceback.contains("line 232")) {
+                sb.append("HEALING DIRECTIVE FOR SYNTAX ERROR ON WHEEL OBJECT FILTERING:\n")
+                  .append("- Fix the list comprehension using standard, valid syntax:\n")
+                  .append("  _wheel_keys = ['wheel', 'tire', 'rim', 'tyre', 'disc']\n")
+                  .append("  _wheel_objs = [m for m in _car_meshes if any(wk in m.name.lower() for wk in _wheel_keys)]\n\n");
+            }
+            if (errorTraceback.toLowerCase().contains("timeout") || errorTraceback.contains("600s")) {
+                sb.append("HEALING DIRECTIVE FOR TIMEOUT OPTIMIZATION:\n")
+                  .append("- Batch or join repeated mesh primitives using bmesh or bpy.ops.object.join(), reduce per-object operator loops, and clamp Cycles bounces.\n\n");
+            }
         }
 
         sb.append("HEALING DIRECTIVE FOR VEHICLE SCENE INTEGRATION:\n")
           .append("- Enforce Rule 1: Car length normalized to 4.5m across combined bounding box, scale transforms applied.\n")
-          .append("- Enforce Rule 2: Multi-lane asphalt road 14m wide x 250m long, Z=0.0, rotation (0,0,0), center dashes at Z=0.005 UP (0,0,1).\n")
+          .append("- Enforce Rule 2: Multi-lane asphalt road 14m wide x 250m long, Z=0.0, rotation (0,0,0), center dashes at Z=0.005 UP (0,0,1). DO NOT DROP THE ROAD.\n")
           .append("- Enforce Rule 3: Centered at X=0.0, tires flush on road at Z=0.0, start at Y=5.0.\n")
           .append("- Enforce Rule 4: Master Empty 'Model_Root' parents all car sub-meshes, location keyframed Y=5.0 (frame 1) to Y=80.0 (frame 60), wheels spinning.\n")
-          .append("- Enforce Rule 5: Low dramatic 3/4 front tracking camera moving with car down highway.\n\n");
+          .append("- Enforce Rule 5: Tracking camera parented to 'Model_Root' at (-3.8, -7.0, 2.2) with TRACK_TO constraint. Add bright SUN light and world radiance so the video and preview are NEVER pitch black.\n")
+          .append("- Ensure `export_scene.gltf` runs at the very end so BOTH the car and the highway road are in 'output/model.glb'.\n\n");
 
         sb.append("=== THE FAULTY SCRIPT THAT FAILED ===\n")
           .append(failedScript != null ? failedScript : "# No script content");
