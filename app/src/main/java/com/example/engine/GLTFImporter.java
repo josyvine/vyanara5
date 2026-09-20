@@ -472,6 +472,20 @@ public class GLTFImporter {
                                                     finalValues[k * 3 + 2] = euler[2];
                                                 }
                                             }
+                                            // Unroll angles across consecutive keyframes to prevent Gimbal Lock flips
+                                            for (int k = 1; k < numKeys; k++) {
+                                                for (int axis = 0; axis < 3; axis++) {
+                                                    float diff = finalValues[k * 3 + axis] - finalValues[(k - 1) * 3 + axis];
+                                                    while (diff > 180.0f) {
+                                                        finalValues[k * 3 + axis] -= 360.0f;
+                                                        diff = finalValues[k * 3 + axis] - finalValues[(k - 1) * 3 + axis];
+                                                    }
+                                                    while (diff < -180.0f) {
+                                                        finalValues[k * 3 + axis] += 360.0f;
+                                                        diff = finalValues[k * 3 + axis] - finalValues[(k - 1) * 3 + axis];
+                                                    }
+                                                }
+                                            }
                                             targetObj.addAnimationTrack("rotation", times, finalValues);
                                         } else if ("translation".equalsIgnoreCase(path)) {
                                             targetObj.addAnimationTrack("translation", times, rawValues);
@@ -587,6 +601,61 @@ public class GLTFImporter {
         Transform transform = object.getTransform();
         if (transform == null) return;
 
+        // 1. Full 4x4 Column-Major Matrix Decomposition (Crucial for Assimp converted FBX models)
+        JSONArray matrix = nodeObj.optJSONArray("matrix");
+        if (matrix != null && matrix.length() >= 16) {
+            float[] m = new float[16];
+            for (int i = 0; i < 16; i++) {
+                m[i] = (float) matrix.optDouble(i, (i % 5 == 0) ? 1.0 : 0.0);
+            }
+
+            // Translation vector (column 3: indices 12, 13, 14)
+            float px = m[12];
+            float py = m[13];
+            float pz = m[14];
+
+            // Scale is column vectors magnitudes
+            float sx = (float) Math.sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+            float sy = (float) Math.sqrt(m[4] * m[4] + m[5] * m[5] + m[6] * m[6]);
+            float sz = (float) Math.sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+
+            // Extract normalized rotation matrix
+            float r00 = sx > 0.0001f ? m[0] / sx : 1.0f;
+            float r10 = sx > 0.0001f ? m[1] / sx : 0.0f;
+            float r20 = sx > 0.0001f ? m[2] / sx : 0.0f;
+
+            float r01 = sy > 0.0001f ? m[4] / sy : 0.0f;
+            float r11 = sy > 0.0001f ? m[5] / sy : 1.0f;
+            float r21 = sy > 0.0001f ? m[6] / sy : 0.0f;
+
+            float r02 = sz > 0.0001f ? m[8] / sz : 0.0f;
+            float r12 = sz > 0.0001f ? m[9] / sz : 0.0f;
+            float r22 = sz > 0.0001f ? m[10] / sz : 1.0f;
+
+            // Convert 3x3 rotation matrix to Euler angles (degrees)
+            float rx, ry, rz;
+            if (Math.abs(r20) < 0.99999f) {
+                ry = (float) -Math.asin(r20);
+                rx = (float) Math.atan2(r21 / Math.cos(ry), r22 / Math.cos(ry));
+                rz = (float) Math.atan2(r10 / Math.cos(ry), r00 / Math.cos(ry));
+            } else {
+                rz = 0.0f;
+                if (r20 <= -0.99999f) {
+                    ry = (float) (Math.PI / 2.0);
+                    rx = (float) Math.atan2(r01, r02);
+                } else {
+                    ry = (float) (-Math.PI / 2.0);
+                    rx = (float) Math.atan2(-r01, -r02);
+                }
+            }
+
+            transform.setPosition(px, py, pz);
+            transform.setRotation((float) Math.toDegrees(rx), (float) Math.toDegrees(ry), (float) Math.toDegrees(rz));
+            transform.setScale(sx, sy, sz);
+            return;
+        }
+
+        // 2. Standard TRS Properties
         JSONArray translation = nodeObj.optJSONArray("translation");
         if (translation != null && translation.length() >= 3) {
             transform.setPosition(
