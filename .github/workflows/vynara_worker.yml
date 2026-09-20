@@ -357,15 +357,19 @@ jobs:
           if is_vehicle_job and not is_explicit_option_a:
               print("Vynara Pipeline: Ingesting Vehicle Post-Processing (4.5m Scale, Road, and Driving Rig)...")
 
-              # Auto-Repair 24 & 28: Non-Destructive Assembly Root Parenting, Scaling, Ground Snap & Wheel Spin
+              # Auto-Repair 24 & 28: Non-Destructive Assembly Root Parenting, Scaling, Orientation & Frame-by-Frame Wheel Spin
               vehicle_root_block = (
                   "\n\n# --- NON-DESTRUCTIVE VEHICLE ASSEMBLY NORMALIZER & DRIVING RIG ---\n"
                   "try:\n"
-                  "    import mathutils, bpy\n"
+                  "    import mathutils, math, bpy\n"
                   "    bpy.context.scene.frame_set(1)\n"
                   "    _env_keys = ['road', 'highway', 'asphalt', 'ground', 'stripe', 'lane', 'marking', 'dash', 'guardrail', 'barrier', 'curb', 'sidewalk', 'terrain', 'plane', 'sky', 'light', 'lamp', 'camera']\n"
                   "    _car_meshes = [o for o in bpy.data.objects if o.type == 'MESH' and not any(k in o.name.lower() for k in _env_keys)]\n"
                   "    if _car_meshes:\n"
+                  "        # 0. Clear any residual conflicting child animation actions\n"
+                  "        for _m in _car_meshes:\n"
+                  "            if _m.animation_data:\n"
+                  "                _m.animation_data_clear()\n"
                   "        # 1. Compute aggregate bounding box in world space\n"
                   "        _min_x, _min_y, _min_z = float('inf'), float('inf'), float('inf')\n"
                   "        _max_x, _max_y, _max_z = float('-inf'), float('-inf'), float('-inf')\n"
@@ -400,30 +404,32 @@ jobs:
                   "            _scale_factor = 4.5 / _car_length\n"
                   "            _root.scale = (_scale_factor, _scale_factor, _scale_factor)\n"
                   "            print(f'Vehicle Normalizer: Rigidly scaled Model_Root from {_car_length:.3f}m to 4.5m length')\n"
-                  "        # 4. Center car in driving lane at X=0, snap tires flush to Z=0, and start at Y=5.0\n"
+                  "        # 4. Heading Detection: Standard FBX automotive assets face -Y. Rotate 180 deg around Z to face forward down highway (+Y)\n"
+                  "        _root.rotation_euler.z = math.pi\n"
+                  "        # 5. Place car in driving lane at X=0, snap tires flush to Z=0, start at Y=15.0 with runway ahead\n"
                   "        bpy.context.scene.frame_start = 1\n"
                   "        bpy.context.scene.frame_end = 60\n"
-                  "        _root.location = (0.0, 5.0, 0.0)\n"
+                  "        _root.location = (0.0, 15.0, 0.0)\n"
                   "        _root.keyframe_insert(data_path='location', frame=1)\n"
-                  "        _root.location = (0.0, 80.0, 0.0)\n"
+                  "        _root.location = (0.0, 95.0, 0.0)\n"
                   "        _root.keyframe_insert(data_path='location', frame=60)\n"
                   "        if _root.animation_data and _root.animation_data.action:\n"
                   "            for _fc in _root.animation_data.action.fcurves:\n"
                   "                for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n"
-                  "        # 5. Animate wheel rotation proportional to distance (75m / 0.35m radius -> -214.28 rad)\n"
+                  "        # 6. Bake wheel spin frame-by-frame (1->60) to eliminate quaternion slerp aliasing/jitter\n"
                   "        _wheel_keys = ['wheel', 'tire', 'rim', 'tyre', 'disc']\n"
                   "        _wheel_objs = [m for m in _car_meshes if any(wk in m.name.lower() for wk in _wheel_keys)]\n"
                   "        for _w in _wheel_objs:\n"
                   "            _w.rotation_mode = 'XYZ'\n"
                   "            _w.animation_data_clear()\n"
-                  "            _w.rotation_euler.x = 0.0\n"
-                  "            _w.keyframe_insert(data_path='rotation_euler', frame=1)\n"
-                  "            _w.rotation_euler.x = -214.28\n"
-                  "            _w.keyframe_insert(data_path='rotation_euler', frame=60)\n"
+                  "            for _f in range(1, 61):\n"
+                  "                _progress = (_f - 1) / 59.0\n"
+                  "                _w.rotation_euler.x = (214.28 * _progress)\n"
+                  "                _w.keyframe_insert(data_path='rotation_euler', frame=_f)\n"
                   "            if _w.animation_data and _w.animation_data.action:\n"
                   "                for _fc in _w.animation_data.action.fcurves:\n"
                   "                    for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n"
-                  "        print(f'Vehicle Rig: Centered at X=0, flush at Z=0, animated Y 5m->80m with {len(_wheel_objs)} wheels')\n"
+                  "        print(f'Vehicle Rig: Rotated 180 deg to face +Y, animated Y 15m->95m with {len(_wheel_objs)} baked wheels')\n"
                   "except Exception as _veh_err: print(f'Vehicle rig note: {_veh_err}')\n"
               )
               bpy_script += vehicle_root_block
@@ -437,10 +443,10 @@ jobs:
                   "        if _o.type == 'MESH' and any(k in _o.name.lower() for k in ['road', 'highway', 'asphalt']):\n"
                   "            _road_obj = _o; break\n"
                   "    if not _road_obj:\n"
-                  "        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, 125.0, 0.0))\n"
+                  "        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, 125.0, -0.01))\n"
                   "        _road_obj = bpy.context.active_object\n"
                   "        _road_obj.name = 'Highway_Road'\n"
-                  "    _road_obj.location = (0.0, 125.0, 0.0)\n"
+                  "    _road_obj.location = (0.0, 125.0, -0.01)\n"
                   "    _road_obj.rotation_euler = (0.0, 0.0, 0.0)\n"
                   "    _road_obj.dimensions = (14.0, 250.0, 0.0)\n"
                   "    bpy.context.view_layer.objects.active = _road_obj\n"
@@ -468,25 +474,34 @@ jobs:
               )
               bpy_script += road_clamp_snippet
 
-              # Auto-Repair 29: Vehicle Cinematic Chase Camera & Tracking Sun Illumination
-              # (Guarantees camera locks to car at all frames and scene is never pitch black)
+              # Auto-Repair 29: Vehicle World Tracking Camera & Key Sunlight Illumination
+              # (Camera stays unparented in world-meters, keyframing along Y alongside the car so it never clips inside chassis)
               vehicle_lighting_camera = (
-                  "\n\n# --- VEHICLE CINEMATIC TRACKING CAMERA & DAYLIGHT SUN ILLUMINATION ---\n"
+                  "\n\n# --- VEHICLE WORLD TRACKING CAMERA & DAYLIGHT SUN ILLUMINATION ---\n"
                   "try:\n"
                   "    import mathutils, math, bpy\n"
                   "    _root = bpy.data.objects.get('Model_Root')\n"
-                  "    # 1. Setup Tracking Camera parented to moving Model_Root\n"
+                  "    # 1. Setup Camera in WORLD METERS (unparented to prevent scale factor from crushing camera inside car)\n"
                   "    _cam = bpy.context.scene.camera\n"
                   "    if not _cam:\n"
                   "        _cam_data = bpy.data.cameras.new('TrackingCam')\n"
                   "        _cam = bpy.data.objects.new('TrackingCam', _cam_data)\n"
                   "        bpy.context.collection.objects.link(_cam)\n"
                   "        bpy.context.scene.camera = _cam\n"
+                  "    _cam.parent = None\n"
+                  "    _cam.scale = (1.0, 1.0, 1.0)\n"
                   "    _cam.data.lens = 35.0\n"
+                  "    _cam.animation_data_clear()\n"
+                  "    _cam.constraints.clear()\n"
+                  "    # Animate camera traveling along Y at dynamic 3/4 chase offset: Y=8.0 (frame 1) to Y=88.0 (frame 60)\n"
+                  "    _cam.location = (-3.8, 8.0, 2.0)\n"
+                  "    _cam.keyframe_insert(data_path='location', frame=1)\n"
+                  "    _cam.location = (-3.8, 88.0, 2.0)\n"
+                  "    _cam.keyframe_insert(data_path='location', frame=60)\n"
+                  "    if _cam.animation_data and _cam.animation_data.action:\n"
+                  "        for _fc in _cam.animation_data.action.fcurves:\n"
+                  "            for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n"
                   "    if _root:\n"
-                  "        _cam.parent = _root\n"
-                  "        _cam.location = (-3.8, -7.0, 2.2)\n"
-                  "        _cam.constraints.clear()\n"
                   "        _track = _cam.constraints.new(type='TRACK_TO')\n"
                   "        _track.target = _root\n"
                   "        _track.track_axis = 'TRACK_NEGATIVE_Z'\n"
@@ -495,8 +510,8 @@ jobs:
                   "    _sun = bpy.data.objects.get('Sun_Light')\n"
                   "    if not _sun:\n"
                   "        _sdata = bpy.data.lights.new(name='Sun_Light', type='SUN')\n"
-                  "        _sdata.energy = 5.0\n"
-                  "        _sdata.color = (1.0, 0.96, 0.90)\n"
+                  "        _sdata.energy = 6.0\n"
+                  "        _sdata.color = (1.0, 0.98, 0.92)\n"
                   "        _sun = bpy.data.objects.new(name='Sun_Light', object_data=_sdata)\n"
                   "        bpy.context.collection.objects.link(_sun)\n"
                   "        _sun.rotation_euler = (math.radians(50.0), math.radians(15.0), math.radians(-35.0))\n"
@@ -512,7 +527,6 @@ jobs:
               print("Vynara Pipeline: Option A / Non-vehicle job detected. Bypassing car normalizer, road, and driving rig.")
 
           # Auto-Repair 10: Animation-Safe GLTF/GLB Exporter (Always executed AFTER scene props and road are created)
-          # Ensures output/model.glb includes the highway road, animated wheels, and materials
           final_export_snippet = (
               "\n\n# --- FINAL COMPLETE SCENE GLTF/GLB EXPORTER ---\n"
               "import bpy, os\n"
@@ -534,19 +548,20 @@ jobs:
           )
           bpy_script += final_export_snippet
 
-          # Auto-Repair 11: Production Snapshot Framing (Always Single Frame Preview - Optimized for Headless CPU)
+          # Auto-Repair 11: Production Snapshot Framing (Always Single Frame Preview - Rendered at Frame 1 where Car is visible)
           if 'output/render.png' not in bpy_script:
               bpy_script += (
-                  "\n\n# Production Snapshot Frame (Fast Headless Preview)\n"
+                  "\n\n# Production Snapshot Frame (Fast Headless Preview at Frame 1)\n"
                   "try:\n"
                   "    import os, math, bpy\n"
+                  "    bpy.context.scene.frame_set(1)\n"
                   "    _cam = bpy.context.scene.camera\n"
                   "    if not _cam:\n"
                   "        _cam_data = bpy.data.cameras.new('CinematicCamera')\n"
                   "        _cam = bpy.data.objects.new('CinematicCamera', _cam_data)\n"
                   "        bpy.context.collection.objects.link(_cam)\n"
                   "        bpy.context.scene.camera = _cam\n"
-                  "        _cam.location = (-2.8, 10.5, 2.5)\n"
+                  "        _cam.location = (-3.8, 8.0, 2.0)\n"
                   "        _cam.rotation_euler = (math.radians(70), 0, math.radians(-15))\n"
                   "    bpy.context.scene.render.engine = 'CYCLES'\n"
                   "    bpy.context.scene.cycles.device = 'CPU'\n"
