@@ -274,8 +274,28 @@ public class AnimationPlayer {
             return;
         }
 
-        Keyframe prevKf = keyframes.get(0);
-        Keyframe nextKf = keyframes.get(keyframes.size() - 1);
+        // Clamped Keyframe Evaluation: Pre-emptively clamp bounds to prevent out-of-range snapping/jittering
+        Keyframe firstKf = keyframes.get(0);
+        Keyframe lastKf = keyframes.get(keyframes.size() - 1);
+
+        if (currentTimeSeconds <= firstKf.getTimestampSeconds()) {
+            float[] t = firstKf.getTranslation();
+            float[] r = firstKf.getRotationDegrees();
+            transform.setPosition(t[0], t[1], t[2]);
+            transform.setRotation(r[0], r[1], r[2]);
+            return;
+        }
+
+        if (currentTimeSeconds >= lastKf.getTimestampSeconds()) {
+            float[] t = lastKf.getTranslation();
+            float[] r = lastKf.getRotationDegrees();
+            transform.setPosition(t[0], t[1], t[2]);
+            transform.setRotation(r[0], r[1], r[2]);
+            return;
+        }
+
+        Keyframe prevKf = firstKf;
+        Keyframe nextKf = lastKf;
 
         for (int i = 0; i < keyframes.size() - 1; i++) {
             if (currentTimeSeconds >= keyframes.get(i).getTimestampSeconds() && 
@@ -292,17 +312,31 @@ public class AnimationPlayer {
         float factor = duration > 0.0001f ? (currentTimeSeconds - t0) / duration : 0f;
         factor = Math.max(0f, Math.min(1f, factor));
 
+        // Smooth Position Translation
         float[] p0 = prevKf.getTranslation();
         float[] p1 = nextKf.getTranslation();
         float tx = p0[0] + factor * (p1[0] - p0[0]);
         float ty = p0[1] + factor * (p1[1] - p0[1]);
         float tz = p0[2] + factor * (p1[2] - p0[2]);
 
+        // Shortest-Path Modular Angular Interpolation (Prevents 360-degree flipping & shaking)
         float[] r0 = prevKf.getRotationDegrees();
         float[] r1 = nextKf.getRotationDegrees();
-        float rx = r0[0] + factor * (r1[0] - r0[0]);
-        float ry = r0[1] + factor * (r1[1] - r0[1]);
-        float rz = r0[2] + factor * (r1[2] - r0[2]);
+
+        float diffX = (r1[0] - r0[0]) % 360.0f;
+        if (diffX > 180.0f) diffX -= 360.0f;
+        if (diffX < -180.0f) diffX += 360.0f;
+        float rx = r0[0] + factor * diffX;
+
+        float diffY = (r1[1] - r0[1]) % 360.0f;
+        if (diffY > 180.0f) diffY -= 360.0f;
+        if (diffY < -180.0f) diffY += 360.0f;
+        float ry = r0[1] + factor * diffY;
+
+        float diffZ = (r1[2] - r0[2]) % 360.0f;
+        if (diffZ > 180.0f) diffZ -= 360.0f;
+        if (diffZ < -180.0f) diffZ += 360.0f;
+        float rz = r0[2] + factor * diffZ;
 
         transform.setPosition(tx, ty, tz);
         transform.setRotation(rx, ry, rz);
