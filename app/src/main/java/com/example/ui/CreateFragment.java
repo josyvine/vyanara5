@@ -90,9 +90,22 @@ public class CreateFragment extends Fragment {
                         if (selectedScriptFileName == null || selectedScriptFileName.isEmpty()) {
                             selectedScriptFileName = "custom_script.py";
                         }
+
+                        // CRITICAL FIX: Attaching a custom procedural script disassociates any previously selected 3D model
+                        // This prevents residual cars from being uploaded with standalone procedural scripts (e.g. skyscrapers)
+                        currentActiveAsset = null;
+                        if (runtime != null) {
+                            runtime.setActiveSelectedAsset(null);
+                        }
+
+                        // Automatically set pipeline mode to Option A
+                        if (spinnerAutoMode != null && spinnerAutoMode.getCount() > 0) {
+                            spinnerAutoMode.setSelection(0); // Option A: Procedural Script (Fast)
+                        }
+
                         updateReferenceUI();
                         etPrompt.setHint("Script attached: " + selectedScriptFileName + " (Prompt is optional)");
-                        VynaraLogger.system("CreateFragment: Attached Python script: " + selectedScriptFileName);
+                        VynaraLogger.system("CreateFragment: Attached Python script: " + selectedScriptFileName + " (Disassociated active 3D models)");
                         Toast.makeText(getContext(), "Attached Python Script: " + selectedScriptFileName + "\nPrompt is now optional.", Toast.LENGTH_LONG).show();
                     }
                 }
@@ -231,21 +244,21 @@ public class CreateFragment extends Fragment {
         Button btnGenerate = view.findViewById(R.id.btn_create_generate);
         if (btnGenerate != null) {
             btnGenerate.setOnClickListener(v -> {
-                // Ensure runtime active asset is refreshed
-                if (currentActiveAsset == null && runtime != null) {
+                // If a script is attached, do NOT restore old cached assets from runtime
+                if (selectedScriptUri == null && currentActiveAsset == null && runtime != null) {
                     currentActiveAsset = runtime.getActiveSelectedAsset();
                 }
 
                 String prompt = etPrompt.getText().toString().trim();
 
-                // If an asset is loaded, construct intelligent automotive / action direction prompt
-                if (currentActiveAsset != null) {
-                    if (prompt.isEmpty()) {
-                        prompt = "Cinematic high-speed driving shot of " + currentActiveAsset.getName() + " tearing down a highway next to a guardrail with low-angle wheel camera and motion blur.";
-                    }
-                } else if (selectedScriptUri != null) {
+                // If a custom script is attached, it takes total precedence over residual models
+                if (selectedScriptUri != null) {
                     if (prompt.isEmpty()) {
                         prompt = "Custom Script: " + (selectedScriptFileName != null ? selectedScriptFileName : "custom_model.py");
+                    }
+                } else if (currentActiveAsset != null) {
+                    if (prompt.isEmpty()) {
+                        prompt = "Cinematic high-speed driving shot of " + currentActiveAsset.getName() + " tearing down a highway next to a guardrail with low-angle wheel camera and motion blur.";
                     }
                 } else {
                     if (prompt.isEmpty()) {
@@ -285,22 +298,20 @@ public class CreateFragment extends Fragment {
 
                 List<String> refUrisStrList = new ArrayList<>();
 
-                // If an active imported model exists, verify file existence before binding
-                if (currentActiveAsset != null && currentActiveAsset.getFilePath() != null) {
+                // If custom script is attached, cache it locally and append FIRST (exclusive of model fallback)
+                if (selectedScriptUri != null) {
+                    String cachedScriptPath = cacheCustomScript(requireContext(), selectedScriptUri);
+                    if (cachedScriptPath != null) {
+                        refUrisStrList.add(cachedScriptPath);
+                    }
+                } else if (currentActiveAsset != null && currentActiveAsset.getFilePath() != null) {
+                    // Only bind active imported model if no custom script is attached
                     File assetFile = new File(currentActiveAsset.getFilePath());
                     if (assetFile.exists() && assetFile.length() > 0) {
                         refUrisStrList.add("model:" + currentActiveAsset.getFilePath());
                         VynaraLogger.system("CreateFragment: Bound active asset [" + currentActiveAsset.getName() + "] (" + assetFile.length() + " bytes) to production payload.");
                     } else {
                         VynaraLogger.w("CreateFragment: Active asset file is missing or empty on disk: " + currentActiveAsset.getFilePath());
-                    }
-                }
-
-                // If custom script is attached, cache it locally and append
-                if (selectedScriptUri != null) {
-                    String cachedScriptPath = cacheCustomScript(requireContext(), selectedScriptUri);
-                    if (cachedScriptPath != null) {
-                        refUrisStrList.add(cachedScriptPath);
                     }
                 }
 
@@ -336,10 +347,10 @@ public class CreateFragment extends Fragment {
     /**
      * Bridges AssetsFragment -> CreateFragment:
      * When user selects or imports an asset in AssetsFragment, CreateFragment automatically
-     * loads it as the active model to direct and animate.
+     * loads it as the active model to direct and animate (unless a custom script is currently attached).
      */
     private void syncActiveAssetFromRuntime() {
-        if (runtime == null) return;
+        if (runtime == null || selectedScriptUri != null) return;
         Asset active = runtime.getActiveSelectedAsset();
         if (active != null && !active.equals(currentActiveAsset)) {
             currentActiveAsset = active;
@@ -395,13 +406,11 @@ public class CreateFragment extends Fragment {
             int imageCount = selectedImageUris.size();
             StringBuilder sb = new StringBuilder();
 
-            if (currentActiveAsset != null) {
-                sb.append("🏎️ Model: ").append(currentActiveAsset.getName())
-                  .append(" (").append(currentActiveAsset.getFormat()).append(") ");
-            }
-
             if (selectedScriptFileName != null) {
                 sb.append("📜 ").append(selectedScriptFileName).append(" (Attached) ");
+            } else if (currentActiveAsset != null) {
+                sb.append("🏎️ Model: ").append(currentActiveAsset.getName())
+                  .append(" (").append(currentActiveAsset.getFormat()).append(") ");
             }
 
             if (imageCount > 0) {
