@@ -293,12 +293,9 @@ public class GitHubWorkflowBridge {
             return;
         }
 
-        // Auto-detect Option A raw script tags if passed in the script content
         boolean isRaw = isRawScript || (bpyScript != null && (bpyScript.contains("is_raw_script=True") || bpyScript.startsWith("# VYNARA_PIPELINE: OPTION_A")));
         String effectivePipelineMode = (pipelineMode != null && !pipelineMode.isEmpty()) ? pipelineMode : (isRaw ? "OPTION_A" : "PROCEDURAL_PYTHON");
 
-        // CRITICAL FIX: Only fallback to active selected asset if this is NOT a standalone raw procedural script.
-        // Bypasses residual 3D car models when the user is generating a clean procedural building or asset.
         if (!isRaw && (inputModelFile == null || !inputModelFile.exists())) {
             try {
                 ProjectRuntime runtime = ProjectRuntime.getInstance();
@@ -314,20 +311,13 @@ public class GitHubWorkflowBridge {
             } catch (Throwable ignored) {}
         }
 
-        // If an imported 3D model exists and is intentionally bound, upload to repository first
         if (inputModelFile != null && inputModelFile.exists() && inputModelFile.length() > 0 && !isRaw) {
             uploadModelAndDispatch(repository, personalAccessToken, eventType, assetId, bpyScript, inputModelFile, isRaw, effectivePipelineMode, callback);
         } else {
-            // Fast direct dispatch for pure procedural code or prompt-based scenes
             executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, null, isRaw, effectivePipelineMode, callback);
         }
     }
 
-    /**
-     * Uploads the imported 3D model to the repository at inputs/input_model.<ext>
-     * so that GitHub Actions runner has the physical file ready when Blender starts.
-     * Includes SHA-1 comparison to bypass redundant re-uploads on retries.
-     */
     private void uploadModelAndDispatch(String repository,
                                         String personalAccessToken,
                                         String eventType,
@@ -348,7 +338,6 @@ public class GitHubWorkflowBridge {
 
         VynaraLogger.system("GitHubWorkflowBridge: Checking repository state for: " + targetPath);
 
-        // Step 1: Query existing SHA & file size (to allow cache hit bypass or overwrite)
         Request getShaReq = new Request.Builder()
                 .url(contentsUrl)
                 .header("Authorization", "Bearer " + personalAccessToken.trim())
@@ -360,7 +349,6 @@ public class GitHubWorkflowBridge {
         httpClient.newCall(getShaReq).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
-                // If lookup fails due to network, attempt direct upload
                 performPutModel(repository, personalAccessToken, eventType, assetId, bpyScript, modelFile, targetPath, null, isRawScript, pipelineMode, callback);
             }
 
@@ -377,7 +365,6 @@ public class GitHubWorkflowBridge {
                 }
                 response.close();
 
-                // Fast Checksum Comparison: If the remote file has identical Git SHA and size, bypass upload entirely!
                 String localGitBlobSha = computeGitBlobSha(modelFile);
                 if (existingSha != null && localGitBlobSha != null 
                         && existingSha.equalsIgnoreCase(localGitBlobSha) 
@@ -480,7 +467,6 @@ public class GitHubWorkflowBridge {
             try {
                 String b64Script = Base64.encodeToString(safeScript.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
                 clientPayload.put("bpy_script", "b64:" + b64Script);
-                // Only populate secondary duplicate key if payload stays well within GitHub's 64KB API limit
                 if (b64Script.length() < 16000) {
                     clientPayload.put("bpy_script_b64", b64Script);
                 }
@@ -1122,7 +1108,7 @@ public class GitHubWorkflowBridge {
 
     /**
      * Extracts the 3D model (.glb), preview image (.png), cinematic video (.mp4/.webm),
-     * and parses error.txt / blender_execution.log.
+     * and parses error.txt / blender_execution.log with throttled summary output.
      */
     private boolean extractGlbFromZip(File zipFile, File destinationGlbFile) {
         boolean glbFound = false;
@@ -1197,16 +1183,23 @@ public class GitHubWorkflowBridge {
                         sLastBlenderError = extractErrorLine(sLastBlenderTraceback);
                     }
 
-                    VynaraLogger.system("========== BLENDER WORKER INTERNAL LOG START ==========");
+                    // Safe Throttled Logging: Prevent flooding Android UI thread with 15,000+ frame lines
                     String[] lines = logContent.split("\\r?\\n");
-                    for (String line : lines) {
-                        if (line.trim().isEmpty()) continue;
+                    int totalLines = lines.length;
+                    int tailStartIndex = Math.max(0, totalLines - 40);
+
+                    VynaraLogger.system("========== BLENDER WORKER INTERNAL LOG START (" + totalLines + " lines) ==========");
+                    for (int i = 0; i < totalLines; i++) {
+                        String line = lines[i];
+                        if (line == null || line.trim().isEmpty()) continue;
                         String lowerLine = line.toLowerCase(Locale.US);
-                        if (lowerLine.contains("error") || lowerLine.contains("exception")
+                        boolean isErrorLine = lowerLine.contains("error") || lowerLine.contains("exception")
                                 || lowerLine.contains("traceback") || lowerLine.contains("failed")
-                                || lowerLine.contains("syntaxerror")) {
+                                || lowerLine.contains("syntaxerror");
+
+                        if (isErrorLine) {
                             VynaraLogger.e("[BLENDER_WORKER] " + line.trim());
-                        } else {
+                        } else if (i >= tailStartIndex) {
                             VynaraLogger.cloud("[BLENDER_WORKER] " + line.trim());
                         }
                     }
