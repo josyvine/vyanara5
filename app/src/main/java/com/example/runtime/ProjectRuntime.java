@@ -11,6 +11,8 @@ import com.example.character.Character;
 import com.example.character.CharacterManager;
 import com.example.character.CharacterSpecification;
 import com.example.engine.GLTFImporter;
+import com.example.engine.Mesh;
+import com.example.engine.Scene;
 import com.example.engine.SceneObject;
 import com.example.engine.ThreeDEngine;
 import com.example.knowledge.KnowledgeManager;
@@ -22,6 +24,7 @@ import com.example.utils.VynaraLogger;
 import com.example.validation.ValidationManager;
 
 import java.io.File;
+import java.util.List;
 import java.util.Locale;
 
 public class ProjectRuntime {
@@ -106,6 +109,11 @@ public class ProjectRuntime {
         VynaraLogger.system("ProjectRuntime: Active selected asset set to [" + (asset != null ? asset.getName() : "None") + "]");
     }
 
+    public void clearActiveSelectedAsset() {
+        this.activeSelectedAsset = null;
+        VynaraLogger.system("ProjectRuntime: Cleared active selected asset.");
+    }
+
     /**
      * Phase 15 Alignment: Dynamic Asset Injector. Imports generated meshes,
      * user imported files (.fbx, .glb, .obj), materials, characters, or vehicles
@@ -136,8 +144,55 @@ public class ProjectRuntime {
                     try {
                         GLTFImporter.ImportResult result = GLTFImporter.loadFromFile(diskFile);
                         if (result != null && !result.isEmpty()) {
-                            for (SceneObject obj : result.getSceneObjects()) {
-                                engine.getSceneManager().getActiveScene().addObject(obj);
+                            Scene activeScene = engine.getSceneManager().getActiveScene();
+                            
+                            // Remove residual default placeholder cubes to prevent dual-mesh stacking
+                            activeScene.getObjects().removeIf(o -> "Cube".equalsIgnoreCase(o.getName()) || "default_cube".equalsIgnoreCase(o.getId()));
+
+                            List<SceneObject> importedObjects = result.getSceneObjects();
+
+                            // Auto-normalize scale & ground contact for vehicles modeled in millimeters/centimeters
+                            boolean isVehicle = "VEHICLE".equals(category) || name.contains("car") || name.contains("r8") || name.contains("auto");
+                            if (isVehicle && !importedObjects.isEmpty()) {
+                                float minX = Float.POSITIVE_INFINITY, maxX = Float.NEGATIVE_INFINITY;
+                                float minY = Float.POSITIVE_INFINITY, maxY = Float.NEGATIVE_INFINITY;
+                                float minZ = Float.POSITIVE_INFINITY, maxZ = Float.NEGATIVE_INFINITY;
+
+                                for (SceneObject obj : importedObjects) {
+                                    for (SceneObject sub : obj.getFlatChildrenList()) {
+                                        Mesh m = sub.getMesh();
+                                        if (m != null && m.getVertices() != null) {
+                                            float[] v = m.getVertices();
+                                            for (int i = 0; i < v.length; i += 3) {
+                                                if (v[i] < minX) minX = v[i];
+                                                if (v[i] > maxX) maxX = v[i];
+                                                if (v[i+1] < minY) minY = v[i+1];
+                                                if (v[i+1] > maxY) maxY = v[i+1];
+                                                if (v[i+2] < minZ) minZ = v[i+2];
+                                                if (v[i+2] > maxZ) maxZ = v[i+2];
+                                            }
+                                        }
+                                    }
+                                }
+
+                                float spanX = maxX - minX;
+                                float spanY = maxY - minY;
+                                float spanZ = maxZ - minZ;
+                                float maxSpan = Math.max(spanX, Math.max(spanY, spanZ));
+
+                                if (maxSpan > 10.0f) {
+                                    float scaleFactor = 4.5f / maxSpan;
+                                    for (SceneObject obj : importedObjects) {
+                                        obj.getTransform().setScale(scaleFactor, scaleFactor, scaleFactor);
+                                        // Snap flush to ground level at Z=0
+                                        obj.getTransform().setPosition(0.0f, 0.0f, 0.0f);
+                                    }
+                                    VynaraLogger.system("ProjectRuntime: Auto-normalized oversized vehicle from " + maxSpan + "m down to 4.5m length.");
+                                }
+                            }
+
+                            for (SceneObject obj : importedObjects) {
+                                activeScene.addObject(obj);
                             }
                             for (Character c : result.getCharacters()) {
                                 characterManager.registerCharacter(c);
