@@ -24,6 +24,7 @@ import com.example.utils.VynaraLogger;
 import com.example.validation.ValidationManager;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
@@ -158,19 +159,21 @@ public class ProjectRuntime {
                                 float minY = Float.POSITIVE_INFINITY, maxY = Float.NEGATIVE_INFINITY;
                                 float minZ = Float.POSITIVE_INFINITY, maxZ = Float.NEGATIVE_INFINITY;
 
+                                List<Mesh> allMeshes = new ArrayList<>();
                                 for (SceneObject obj : importedObjects) {
-                                    for (SceneObject sub : obj.getFlatChildrenList()) {
-                                        Mesh m = sub.getMesh();
-                                        if (m != null && m.getVertices() != null) {
-                                            float[] v = m.getVertices();
-                                            for (int i = 0; i < v.length; i += 3) {
-                                                if (v[i] < minX) minX = v[i];
-                                                if (v[i] > maxX) maxX = v[i];
-                                                if (v[i+1] < minY) minY = v[i+1];
-                                                if (v[i+1] > maxY) maxY = v[i+1];
-                                                if (v[i+2] < minZ) minZ = v[i+2];
-                                                if (v[i+2] > maxZ) maxZ = v[i+2];
-                                            }
+                                    collectSubMeshes(obj, allMeshes);
+                                }
+
+                                for (Mesh m : allMeshes) {
+                                    float[] v = m.getVertices();
+                                    if (v != null) {
+                                        for (int i = 0; i < v.length; i += 3) {
+                                            if (v[i] < minX) minX = v[i];
+                                            if (v[i] > maxX) maxX = v[i];
+                                            if (v[i+1] < minY) minY = v[i+1];
+                                            if (v[i+1] > maxY) maxY = v[i+1];
+                                            if (v[i+2] < minZ) minZ = v[i+2];
+                                            if (v[i+2] > maxZ) maxZ = v[i+2];
                                         }
                                     }
                                 }
@@ -251,6 +254,22 @@ public class ProjectRuntime {
         }
 
         return success;
+    }
+
+    /**
+     * Recursively traverses a SceneObject and all its children to collect all attached Mesh geometries.
+     */
+    private void collectSubMeshes(SceneObject obj, List<Mesh> outMeshes) {
+        if (obj == null) return;
+        if (obj.getMesh() != null && obj.getMesh().getVertices() != null) {
+            outMeshes.add(obj.getMesh());
+        }
+        List<SceneObject> children = obj.getChildren();
+        if (children != null) {
+            for (SceneObject child : children) {
+                collectSubMeshes(child, outMeshes);
+            }
+        }
     }
 
     /**
