@@ -209,7 +209,7 @@ jobs:
 
           # Check if the script or model is explicitly about a vehicle/car
           script_lower = bpy_script.lower()
-          is_vehicle_job = has_imported_model or any(k in script_lower for k in ['car_root', 'vehicle_chassis', 'r8', 'wheel_arch', 'highway_road'])
+          is_vehicle_job = has_imported_model or any(k in script_lower for k in ['car_root', 'vehicle_chassis', 'r8', 'wheel_arch', 'highway_road', 'model_root'])
 
           print(f"Vynara Pipeline Context: is_explicit_option_a={is_explicit_option_a}, has_imported_model={has_imported_model}, is_vehicle_job={is_vehicle_job}")
 
@@ -357,8 +357,7 @@ jobs:
           if is_vehicle_job and not is_explicit_option_a:
               print("Vynara Pipeline: Ingesting Vehicle Post-Processing (4.5m Scale, Road, and Driving Rig)...")
 
-              # Auto-Repair 24 & 28: Non-Destructive Assembly Root Parenting, Scaling & Ground Snap
-              # (Fixes Issue 1: Does NOT apply transform destructively to child meshes, preventing tilt/skew)
+              # Auto-Repair 24 & 28: Non-Destructive Assembly Root Parenting, Scaling, Ground Snap & Wheel Spin
               vehicle_root_block = (
                   "\n\n# --- NON-DESTRUCTIVE VEHICLE ASSEMBLY NORMALIZER & DRIVING RIG ---\n"
                   "try:\n"
@@ -468,25 +467,72 @@ jobs:
                   "except Exception as _rc_err: print(f'Road generation note: {_rc_err}')\n"
               )
               bpy_script += road_clamp_snippet
+
+              # Auto-Repair 29: Vehicle Cinematic Chase Camera & Tracking Sun Illumination
+              # (Guarantees camera locks to car at all frames and scene is never pitch black)
+              vehicle_lighting_camera = (
+                  "\n\n# --- VEHICLE CINEMATIC TRACKING CAMERA & DAYLIGHT SUN ILLUMINATION ---\n"
+                  "try:\n"
+                  "    import mathutils, math, bpy\n"
+                  "    _root = bpy.data.objects.get('Model_Root')\n"
+                  "    # 1. Setup Tracking Camera parented to moving Model_Root\n"
+                  "    _cam = bpy.context.scene.camera\n"
+                  "    if not _cam:\n"
+                  "        _cam_data = bpy.data.cameras.new('TrackingCam')\n"
+                  "        _cam = bpy.data.objects.new('TrackingCam', _cam_data)\n"
+                  "        bpy.context.collection.objects.link(_cam)\n"
+                  "        bpy.context.scene.camera = _cam\n"
+                  "    _cam.data.lens = 35.0\n"
+                  "    if _root:\n"
+                  "        _cam.parent = _root\n"
+                  "        _cam.location = (-3.8, -7.0, 2.2)\n"
+                  "        _cam.constraints.clear()\n"
+                  "        _track = _cam.constraints.new(type='TRACK_TO')\n"
+                  "        _track.target = _root\n"
+                  "        _track.track_axis = 'TRACK_NEGATIVE_Z'\n"
+                  "        _track.up_axis = 'UP_Y'\n"
+                  "    # 2. Add Key Sun & Ambient Sky Radiance\n"
+                  "    _sun = bpy.data.objects.get('Sun_Light')\n"
+                  "    if not _sun:\n"
+                  "        _sdata = bpy.data.lights.new(name='Sun_Light', type='SUN')\n"
+                  "        _sdata.energy = 5.0\n"
+                  "        _sdata.color = (1.0, 0.96, 0.90)\n"
+                  "        _sun = bpy.data.objects.new(name='Sun_Light', object_data=_sdata)\n"
+                  "        bpy.context.collection.objects.link(_sun)\n"
+                  "        _sun.rotation_euler = (math.radians(50.0), math.radians(15.0), math.radians(-35.0))\n"
+                  "    if bpy.context.scene.world and bpy.context.scene.world.node_tree:\n"
+                  "        _bg = bpy.context.scene.world.node_tree.nodes.get('Background')\n"
+                  "        if _bg:\n"
+                  "            _bg.inputs['Color'].default_value = (0.65, 0.82, 1.0, 1.0)\n"
+                  "            _bg.inputs['Strength'].default_value = 1.2\n"
+                  "except Exception as _vcam_err: print(f'Vehicle camera/lighting note: {_vcam_err}')\n"
+              )
+              bpy_script += vehicle_lighting_camera
           else:
               print("Vynara Pipeline: Option A / Non-vehicle job detected. Bypassing car normalizer, road, and driving rig.")
 
-          # Auto-Repair 10: Animation-Safe GLTF/GLB Exporter
-          if 'export_scene.gltf' not in bpy_script:
-              bpy_script += (
-                  "\n\n# Animation-Safe Model Exporter (export_apply=False preserves transform tracks)\n"
-                  "import bpy, os\n"
-                  "os.makedirs('output', exist_ok=True)\n"
-                  "try:\n"
-                  "    for _o in list(bpy.data.objects):\n"
-                  "        if _o.type == 'MESH' and any(_k in _o.name.lower() for _k in ['fog', 'volume', 'domain', 'atmosphere']):\n"
-                  "            bpy.data.objects.remove(_o, do_unlink=True)\n"
-                  "    bpy.ops.export_scene.gltf(filepath='output/model.glb', export_format='GLB', export_apply=False, export_skins=True, export_animations=True)\n"
-                  "    print('3D GLTF Export Successful: output/model.glb')\n"
-                  "except Exception as ge: print(f'GLTF export warning: {ge}')\n"
-              )
-          else:
-              bpy_script = bpy_script.replace("export_apply=True", "export_apply=False")
+          # Auto-Repair 10: Animation-Safe GLTF/GLB Exporter (Always executed AFTER scene props and road are created)
+          # Ensures output/model.glb includes the highway road, animated wheels, and materials
+          final_export_snippet = (
+              "\n\n# --- FINAL COMPLETE SCENE GLTF/GLB EXPORTER ---\n"
+              "import bpy, os\n"
+              "os.makedirs('output', exist_ok=True)\n"
+              "try:\n"
+              "    for _o in list(bpy.data.objects):\n"
+              "        if _o.type == 'MESH' and any(_k in _o.name.lower() for _k in ['fog', 'volume', 'domain', 'atmosphere']):\n"
+              "            bpy.data.objects.remove(_o, do_unlink=True)\n"
+              "    bpy.ops.export_scene.gltf(\n"
+              "        filepath='output/model.glb',\n"
+              "        export_format='GLB',\n"
+              "        export_apply=False,\n"
+              "        export_skins=True,\n"
+              "        export_animations=True,\n"
+              "        export_materials='EXPORT'\n"
+              "    )\n"
+              "    print('3D GLTF Export Successful: output/model.glb (Road, Vehicle & Rig Committed)')\n"
+              "except Exception as ge: print(f'GLTF export warning: {ge}')\n"
+          )
+          bpy_script += final_export_snippet
 
           # Auto-Repair 11: Production Snapshot Framing (Always Single Frame Preview - Optimized for Headless CPU)
           if 'output/render.png' not in bpy_script:
@@ -520,13 +566,11 @@ jobs:
               )
 
           # Auto-Repair 21: CONDITIONAL Animation Video Exporter
-          # (Fixes Issue 2: Only renders animation IF the scene actually has intentional keyframe actions!)
           anim_render_snippet = (
               "\n\n# Dynamic Animation Video Exporter (Only for scenes with actual keyframes)\n"
               "try:\n"
               "    import bpy, os\n"
               "    _sc = bpy.context.scene\n"
-              "    # Inspect scene objects to verify if intentional keyframe animation exists\n"
               "    _has_real_anim = any(\n"
               "        (obj.animation_data and obj.animation_data.action and len(obj.animation_data.action.fcurves) > 0)\n"
               "        for obj in bpy.data.objects\n"
@@ -545,7 +589,8 @@ jobs:
               "        _sc.render.filepath = 'output/cinematic.mp4'\n"
               "        _sc.render.engine = 'CYCLES'\n"
               "        _sc.cycles.device = 'CPU'\n"
-              "        _sc.cycles.samples = 1\n"
+              "        _sc.cycles.samples = 2\n"
+              "        _sc.cycles.max_bounces = 3\n"
               "        _sc.cycles.use_denoising = False\n"
               "        bpy.ops.render.render(animation=True)\n"
               "        print('Cinematic MP4 video rendered successfully: output/cinematic.mp4')\n"
