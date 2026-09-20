@@ -124,7 +124,6 @@ jobs:
                       event_data = json.load(ef)
                       payload = event_data.get('client_payload', {})
                       
-                      # Support base64 model payloads if passed directly
                       input_model_b64 = payload.get('input_model_b64', '')
                       if input_model_b64 and input_model_b64.strip():
                           try:
@@ -137,7 +136,6 @@ jobs:
                           except Exception as me:
                               print(f"Warning unpacking user model: {me}")
 
-                      # Support uploaded custom scripts and dynamic payloads via Base64
                       if 'bpy_script_b64' in payload and payload['bpy_script_b64'].strip():
                           bpy_script = base64.b64decode(payload['bpy_script_b64']).decode('utf-8', errors='ignore')
                       elif 'bpy_script' in payload:
@@ -198,20 +196,23 @@ jobs:
               os.path.exists('input_model.gltf') or os.path.exists('inputs/input_model.gltf')
           )
 
-          # Determine if this run is a standalone raw procedural script (Option A upload)
+          # Determine if this run is a standalone raw procedural script (strictly when NO model was imported)
           pipeline_mode = str(payload.get('pipeline_mode', '')).upper()
-          is_explicit_option_a = (
+          is_explicit_option_a = (not has_imported_model) and (
               bool(payload.get('is_raw_script')) or 
               bool(payload.get('isRawUserScript')) or 
-              ('bpy_script_b64' in payload and not has_imported_model) or
-              (pipeline_mode == 'OPTION_A' and not has_imported_model)
+              ('bpy_script_b64' in payload) or
+              (pipeline_mode == 'OPTION_A')
           )
 
           # Check if the script or model is explicitly about a vehicle/car
           script_lower = bpy_script.lower()
-          is_vehicle_job = has_imported_model or any(k in script_lower for k in ['car_root', 'vehicle_chassis', 'r8', 'wheel_arch', 'highway_road', 'model_root'])
+          is_vehicle_job = has_imported_model or any(k in script_lower for k in ['car_root', 'vehicle_chassis', 'r8', 'wheel_arch', 'highway_road', 'model_root', 'automotive'])
 
           print(f"Vynara Pipeline Context: is_explicit_option_a={is_explicit_option_a}, has_imported_model={has_imported_model}, is_vehicle_job={is_vehicle_job}")
+
+          # CRITICAL FIX: Strip any early premature export calls from Gemini so model.glb is NEVER created before the road!
+          bpy_script = re.sub(r"bpy\.ops\.export_scene\.gltf\([^)]*\)", "print('Stripped early premature GLTF export.')", bpy_script)
 
           # --- AST & REGEX AUTO-REPAIR PIPELINE ---
 
@@ -351,62 +352,61 @@ jobs:
           )
 
           # -------------------------------------------------------------------------
-          # CONDITIONAL VEHICLE AUTO-REPAIRS: ONLY FOR IMPORTED 3D VEHICLES / CARS
-          # (BYPASSED COMPLETELY FOR RAW PROCEDURAL PYTHON UPLOADS / OPTION A)
+          # CONDITIONAL VEHICLE AUTO-REPAIRS: STRICTLY FOR VEHICLE SCENES
+          # (Executes for all imported models or vehicle jobs)
           # -------------------------------------------------------------------------
           if is_vehicle_job and not is_explicit_option_a:
-              print("Vynara Pipeline: Ingesting Vehicle Post-Processing (4.5m Scale, Road, and Driving Rig)...")
+              print("Vynara Pipeline: Ingesting Vehicle Post-Processing (4.5m Scale, Ground Contact, Road, and Driving Rig)...")
 
-              # Auto-Repair 24 & 28: Non-Destructive Assembly Root Parenting, Scaling, Orientation & Frame-by-Frame Wheel Spin
+              # Auto-Repair 24 & 28: Baked Scale, Centered Ground Placement, 180-deg Yaw & Driving Animation
               vehicle_root_block = (
-                  "\n\n# --- NON-DESTRUCTIVE VEHICLE ASSEMBLY NORMALIZER & DRIVING RIG ---\n"
+                  "\n\n# --- ROBUST VEHICLE ASSEMBLY NORMALIZER & DRIVING RIG ---\n"
                   "try:\n"
                   "    import mathutils, math, bpy\n"
                   "    bpy.context.scene.frame_set(1)\n"
                   "    _env_keys = ['road', 'highway', 'asphalt', 'ground', 'stripe', 'lane', 'marking', 'dash', 'guardrail', 'barrier', 'curb', 'sidewalk', 'terrain', 'plane', 'sky', 'light', 'lamp', 'camera']\n"
                   "    _car_meshes = [o for o in bpy.data.objects if o.type == 'MESH' and not any(k in o.name.lower() for k in _env_keys)]\n"
                   "    if _car_meshes:\n"
-                  "        # 0. Clear any residual conflicting child animation actions\n"
+                  "        # 0. Clear residual animation data on individual sub-meshes to prevent transform conflicts\n"
                   "        for _m in _car_meshes:\n"
                   "            if _m.animation_data:\n"
                   "                _m.animation_data_clear()\n"
                   "        # 1. Compute aggregate bounding box in world space\n"
-                  "        _min_x, _min_y, _min_z = float('inf'), float('inf'), float('inf')\n"
-                  "        _max_x, _max_y, _max_z = float('-inf'), float('-inf'), float('-inf')\n"
+                  "        _min_x = min((_m.matrix_world @ mathutils.Vector(corner)).x for _m in _car_meshes for corner in _m.bound_box)\n"
+                  "        _max_x = max((_m.matrix_world @ mathutils.Vector(corner)).x for _m in _car_meshes for corner in _m.bound_box)\n"
+                  "        _min_y = min((_m.matrix_world @ mathutils.Vector(corner)).y for _m in _car_meshes for corner in _m.bound_box)\n"
+                  "        _max_y = max((_m.matrix_world @ mathutils.Vector(corner)).y for _m in _car_meshes for corner in _m.bound_box)\n"
+                  "        _min_z = min((_m.matrix_world @ mathutils.Vector(corner)).z for _m in _car_meshes for corner in _m.bound_box)\n"
+                  "        _max_z = max((_m.matrix_world @ mathutils.Vector(corner)).z for _m in _car_meshes for corner in _m.bound_box)\n"
+                  "        _car_length = max(_max_x - _min_x, _max_y - _min_y)\n"
+                  "        _scale_factor = (4.5 / _car_length) if _car_length > 0.001 else 1.0\n"
+                  "        _cx = (_min_x + _max_x) * 0.5\n"
+                  "        _cy = (_min_y + _max_y) * 0.5\n"
+                  "        _cz = _min_z\n"
+                  "        # 2. Directly bake 4.5m scale, origin centering, 180-deg yaw forward facing (+Y), and ground snap to meshes\n"
                   "        for _m in _car_meshes:\n"
-                  "            for _corner in _m.bound_box:\n"
-                  "                _w = _m.matrix_world @ mathutils.Vector(_corner)\n"
-                  "                _min_x = min(_min_x, _w.x); _max_x = max(_max_x, _w.x)\n"
-                  "                _min_y = min(_min_y, _w.y); _max_y = max(_max_y, _w.y)\n"
-                  "                _min_z = min(_min_z, _w.z); _max_z = max(_max_z, _w.z)\n"
-                  "        _dim_x = _max_x - _min_x; _dim_y = _max_y - _min_y; _dim_z = _max_z - _min_z\n"
-                  "        _car_length = max(_dim_x, _dim_y)\n"
-                  "        _center_x = (_min_x + _max_x) * 0.5\n"
-                  "        _center_y = (_min_y + _max_y) * 0.5\n"
-                  "        _bottom_z = _min_z\n"
-                  "        # 2. Bind all car sub-meshes to Model_Root without destroying relative child transforms\n"
+                  "            _m.location.x = (_m.location.x - _cx) * _scale_factor\n"
+                  "            _m.location.y = (_m.location.y - _cy) * _scale_factor\n"
+                  "            _m.location.z = (_m.location.z - _cz) * _scale_factor\n"
+                  "            _m.scale = (_m.scale.x * _scale_factor, _m.scale.y * _scale_factor, _m.scale.z * _scale_factor)\n"
+                  "            _m.rotation_euler.z += math.pi\n"
+                  "            bpy.context.view_layer.objects.active = _m\n"
+                  "            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)\n"
+                  "        # 3. Create Model_Root at clean unit scale (1,1,1) flush at ground (Z=0.0)\n"
                   "        _root = bpy.data.objects.get('Model_Root')\n"
                   "        if not _root:\n"
                   "            _root = bpy.data.objects.new('Model_Root', None)\n"
                   "            _root.empty_display_type = 'PLAIN_AXES'\n"
                   "            bpy.context.collection.objects.link(_root)\n"
                   "        _root.animation_data_clear()\n"
-                  "        _root.location = (_center_x, _center_y, _bottom_z)\n"
+                  "        _root.location = (0.0, 0.0, 0.0)\n"
                   "        _root.rotation_euler = (0.0, 0.0, 0.0)\n"
                   "        _root.scale = (1.0, 1.0, 1.0)\n"
                   "        bpy.context.view_layer.update()\n"
                   "        for _m in _car_meshes:\n"
-                  "            if not _m.parent:\n"
-                  "                _m.parent = _root\n"
-                  "                _m.matrix_parent_inverse = _root.matrix_world.inverted()\n"
-                  "        # 3. Scale assembly rigidly to 4.5m total automotive length\n"
-                  "        if _car_length > 0.001:\n"
-                  "            _scale_factor = 4.5 / _car_length\n"
-                  "            _root.scale = (_scale_factor, _scale_factor, _scale_factor)\n"
-                  "            print(f'Vehicle Normalizer: Rigidly scaled Model_Root from {_car_length:.3f}m to 4.5m length')\n"
-                  "        # 4. Heading Detection: Standard FBX automotive assets face -Y. Rotate 180 deg around Z to face forward down highway (+Y)\n"
-                  "        _root.rotation_euler.z = math.pi\n"
-                  "        # 5. Place car in driving lane at X=0, snap tires flush to Z=0, start at Y=15.0 with runway ahead\n"
+                  "            _m.parent = _root\n"
+                  "            _m.matrix_parent_inverse = _root.matrix_world.inverted()\n"
+                  "        # 4. Driving Animation along Y: starts at Y=15.0 with runway ahead, drives to Y=95.0\n"
                   "        bpy.context.scene.frame_start = 1\n"
                   "        bpy.context.scene.frame_end = 60\n"
                   "        _root.location = (0.0, 15.0, 0.0)\n"
@@ -416,7 +416,7 @@ jobs:
                   "        if _root.animation_data and _root.animation_data.action:\n"
                   "            for _fc in _root.animation_data.action.fcurves:\n"
                   "                for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n"
-                  "        # 6. Bake wheel spin frame-by-frame (1->60) to eliminate quaternion slerp aliasing/jitter\n"
+                  "        # 5. Bake wheel spin per frame (1->60) to prevent quaternion slerp jitter\n"
                   "        _wheel_keys = ['wheel', 'tire', 'rim', 'tyre', 'disc']\n"
                   "        _wheel_objs = [m for m in _car_meshes if any(wk in m.name.lower() for wk in _wheel_keys)]\n"
                   "        for _w in _wheel_objs:\n"
@@ -429,7 +429,7 @@ jobs:
                   "            if _w.animation_data and _w.animation_data.action:\n"
                   "                for _fc in _w.animation_data.action.fcurves:\n"
                   "                    for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n"
-                  "        print(f'Vehicle Rig: Rotated 180 deg to face +Y, animated Y 15m->95m with {len(_wheel_objs)} baked wheels')\n"
+                  "        print('Vehicle Rig: Normalized to 4.5m length, baked Z=0 flush, animated Y 15m->95m')\n"
                   "except Exception as _veh_err: print(f'Vehicle rig note: {_veh_err}')\n"
               )
               bpy_script += vehicle_root_block
@@ -475,13 +475,12 @@ jobs:
               bpy_script += road_clamp_snippet
 
               # Auto-Repair 29: Vehicle World Tracking Camera & Key Sunlight Illumination
-              # (Camera stays unparented in world-meters, keyframing along Y alongside the car so it never clips inside chassis)
+              # (Camera moves in world coordinates along Y at 3/4 chase offset, never parented to avoid scaling issues)
               vehicle_lighting_camera = (
                   "\n\n# --- VEHICLE WORLD TRACKING CAMERA & DAYLIGHT SUN ILLUMINATION ---\n"
                   "try:\n"
                   "    import mathutils, math, bpy\n"
                   "    _root = bpy.data.objects.get('Model_Root')\n"
-                  "    # 1. Setup Camera in WORLD METERS (unparented to prevent scale factor from crushing camera inside car)\n"
                   "    _cam = bpy.context.scene.camera\n"
                   "    if not _cam:\n"
                   "        _cam_data = bpy.data.cameras.new('TrackingCam')\n"
@@ -493,7 +492,7 @@ jobs:
                   "    _cam.data.lens = 35.0\n"
                   "    _cam.animation_data_clear()\n"
                   "    _cam.constraints.clear()\n"
-                  "    # Animate camera traveling along Y at dynamic 3/4 chase offset: Y=8.0 (frame 1) to Y=88.0 (frame 60)\n"
+                  "    # Animate camera tracking car along Y: from Y=8.0 (frame 1) to Y=88.0 (frame 60)\n"
                   "    _cam.location = (-3.8, 8.0, 2.0)\n"
                   "    _cam.keyframe_insert(data_path='location', frame=1)\n"
                   "    _cam.location = (-3.8, 88.0, 2.0)\n"
@@ -506,7 +505,7 @@ jobs:
                   "        _track.target = _root\n"
                   "        _track.track_axis = 'TRACK_NEGATIVE_Z'\n"
                   "        _track.up_axis = 'UP_Y'\n"
-                  "    # 2. Add Key Sun & Ambient Sky Radiance\n"
+                  "    # Add Key Sun & Ambient Sky Radiance\n"
                   "    _sun = bpy.data.objects.get('Sun_Light')\n"
                   "    if not _sun:\n"
                   "        _sdata = bpy.data.lights.new(name='Sun_Light', type='SUN')\n"
