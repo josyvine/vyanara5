@@ -376,8 +376,8 @@ public class BlenderWorkerAgent {
     }
 
     /**
-     * Builds Worker 2: Details, Road Infrastructure (14m x 250m at Z=0), Center Dashes (Z=0.005 UP),
-     * Master Root Empty Parenting, Lane Placement (X=0, Y=5, Z=0), and Driving Animation (Y: 5 -> 80m).
+     * Builds Worker 2: Details, Road Infrastructure (14m x 250m at Z=-0.01), Center Dashes (Z=0.005 UP),
+     * Master Root Empty Parenting, 180-deg Forward Yaw, Lane Placement (X=0, Y=15, Z=0), and Baked Driving Animation.
      */
     private static String buildWorker2DetailsScript(AIDirectorSpec spec) {
         StringBuilder sb = new StringBuilder();
@@ -397,8 +397,8 @@ public class BlenderWorkerAgent {
         boolean isVehicle = sceneType.contains("vehicle") || sceneType.contains("car") || sceneType.contains("drive") || sceneType.contains("speed");
 
         if (isVehicle) {
-            sb.append("# RULE 2: REALISTIC MULTI-LANE HIGHWAY ROAD (14m wide x 250m long, Z=0.0, rotation (0,0,0))\n");
-            sb.append("bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, 125.0, 0.0))\n");
+            sb.append("# RULE 2: REALISTIC MULTI-LANE HIGHWAY ROAD (14m wide x 250m long, flat along Y-corridor)\n");
+            sb.append("bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, 125.0, -0.01))\n");
             sb.append("road = bpy.context.active_object\n");
             sb.append("road.name = 'Highway_Road'\n");
             sb.append("road.rotation_euler = (0.0, 0.0, 0.0)\n");
@@ -439,7 +439,7 @@ public class BlenderWorkerAgent {
             sb.append("bpy.ops.object.transform_apply(scale=True)\n");
             sb.append("guardrail.data.materials.append(mat_guard)\n\n");
 
-            sb.append("# RULES 3 & 4: MASTER ROOT EMPTY PARENTING, ROAD PLACEMENT & DRIVING ANIMATION\n");
+            sb.append("# RULES 3 & 4: MASTER ROOT EMPTY PARENTING, FORWARD ORIENTATION & DRIVING ANIMATION\n");
             sb.append("_root = bpy.data.objects.get('Model_Root')\n");
             sb.append("if not _root:\n");
             sb.append("    _root = bpy.data.objects.new('Model_Root', None)\n");
@@ -453,31 +453,38 @@ public class BlenderWorkerAgent {
 
             sb.append("_env_filter = ['road', 'highway', 'asphalt', 'ground', 'stripe', 'lane', 'marking', 'dash', 'guardrail', 'barrier', 'curb', 'sidewalk', 'terrain', 'plane', 'sky', 'light', 'lamp', 'camera']\n");
             sb.append("_car_objs = [o for o in bpy.data.objects if o.type == 'MESH' and not any(k in o.name.lower() for k in _env_filter)]\n");
+            sb.append("# 1. Clear residual animation data on child meshes to prevent double-transform shaking\n");
             sb.append("for _co in _car_objs:\n");
+            sb.append("    if _co.animation_data:\n");
+            sb.append("        _co.animation_data_clear()\n");
             sb.append("    _co.parent = _root\n");
             sb.append("    _co.matrix_parent_inverse = _root.matrix_world.inverted()\n\n");
 
-            sb.append("# Placement & Driving: Start at Y=5.0 (frame 1), drive to Y=80.0 (frame 60) centered at X=0, flush at Z=0\n");
+            sb.append("# 2. Auto-Heading: Standard FBX automotive assets face -Y. Rotate 180 deg around Z to face forward down highway (+Y)\n");
+            sb.append("_root.rotation_euler.z = math.pi\n");
+            sb.append("bpy.context.view_layer.update()\n\n");
+
+            sb.append("# 3. Placement & Driving: Start at Y=15.0 with open road ahead, drive to Y=95.0, centered at X=0, flush at Z=0\n");
             sb.append("bpy.context.scene.frame_start = 1\n");
             sb.append("bpy.context.scene.frame_end = 60\n");
-            sb.append("_root.location = (0.0, 5.0, 0.0)\n");
+            sb.append("_root.location = (0.0, 15.0, 0.0)\n");
             sb.append("_root.keyframe_insert(data_path='location', frame=1)\n");
-            sb.append("_root.location = (0.0, 80.0, 0.0)\n");
+            sb.append("_root.location = (0.0, 95.0, 0.0)\n");
             sb.append("_root.keyframe_insert(data_path='location', frame=60)\n");
             sb.append("if _root.animation_data and _root.animation_data.action:\n");
             sb.append("    for _fc in _root.animation_data.action.fcurves:\n");
             sb.append("        for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n\n");
 
-            sb.append("# Animate Wheel Spin around axles proportional to distance (75m displacement -> -214.28 rad)\n");
+            sb.append("# 4. Baked Wheel Spin: Keyframe frame-by-frame (1->60) to eliminate quaternion slerp jitter\n");
             sb.append("_wheel_keys = ['wheel', 'tire', 'rim', 'tyre', 'disc']\n");
             sb.append("_wheels = [o for o in _car_objs if any(wk in o.name.lower() for wk in _wheel_keys)]\n");
             sb.append("for _wo in _wheels:\n");
             sb.append("    _wo.rotation_mode = 'XYZ'\n");
             sb.append("    _wo.animation_data_clear()\n");
-            sb.append("    _wo.rotation_euler.x = 0.0\n");
-            sb.append("    _wo.keyframe_insert(data_path='rotation_euler', frame=1)\n");
-            sb.append("    _wo.rotation_euler.x = -214.28\n");
-            sb.append("    _wo.keyframe_insert(data_path='rotation_euler', frame=60)\n");
+            sb.append("    for _f in range(1, 61):\n");
+            sb.append("        _prog = (_f - 1) / 59.0\n");
+            sb.append("        _wo.rotation_euler.x = (214.28 * _prog)\n");
+            sb.append("        _wo.keyframe_insert(data_path='rotation_euler', frame=_f)\n");
             sb.append("    if _wo.animation_data and _wo.animation_data.action:\n");
             sb.append("        for _fc in _wo.animation_data.action.fcurves:\n");
             sb.append("            for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n");
@@ -500,7 +507,7 @@ public class BlenderWorkerAgent {
     }
 
     /**
-     * Builds Worker 3: Cinematics, Low 3/4 Front Angle Tracking Camera parented to Model_Root (Rule 5),
+     * Builds Worker 3: Cinematics, World Tracking Camera (Outside car chassis),
      * Natural Sun Lighting with Ambient Sky Radiance, 180-deg Optical Motion Blur, AgX Color Management,
      * Complete Scene GLB Export (including Road), and MP4 Video Rendering.
      */
@@ -509,7 +516,7 @@ public class BlenderWorkerAgent {
         int seed = (spec != null) ? spec.getSeedLighting() : 202;
         sb.append("random.seed(").append(seed).append(")\n\n");
 
-        float sunIntensity = (spec != null && spec.getSunIntensity() > 0) ? spec.getSunIntensity() : 5.5f;
+        float sunIntensity = (spec != null && spec.getSunIntensity() > 0) ? spec.getSunIntensity() : 6.0f;
         float sunElevation = (spec != null) ? spec.getSunElevation() : 18.0f;
         float sunAzimuth = (spec != null) ? spec.getSunAzimuth() : -45.0f;
 
@@ -529,20 +536,24 @@ public class BlenderWorkerAgent {
         sb.append("    bpy.context.scene.camera = cam_obj\n\n");
 
         if (isVehicle) {
-            sb.append("    # Place camera tracking car parented to Model_Root at dynamic 3/4 front-quarter angle\n");
+            sb.append("    # Move camera in world-meters along Y (unparented to avoid 1000x downscale inside chassis)\n");
             sb.append("    _root = bpy.data.objects.get('Model_Root')\n");
+            sb.append("    cam_obj.parent = None\n");
+            sb.append("    cam_obj.scale = (1.0, 1.0, 1.0)\n");
             sb.append("    cam_obj.constraints.clear()\n");
             sb.append("    cam_obj.animation_data_clear()\n");
+            sb.append("    cam_obj.location = (-3.8, 8.0, 2.0)\n");
+            sb.append("    cam_obj.keyframe_insert(data_path='location', frame=1)\n");
+            sb.append("    cam_obj.location = (-3.8, 88.0, 2.0)\n");
+            sb.append("    cam_obj.keyframe_insert(data_path='location', frame=60)\n");
+            sb.append("    if cam_obj.animation_data and cam_obj.animation_data.action:\n");
+            sb.append("        for _fc in cam_obj.animation_data.action.fcurves:\n");
+            sb.append("            for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n");
             sb.append("    if _root:\n");
-            sb.append("        cam_obj.parent = _root\n");
-            sb.append("        cam_obj.location = (-3.8, -7.0, 2.2)\n");
             sb.append("        _tt = cam_obj.constraints.new(type='TRACK_TO')\n");
             sb.append("        _tt.target = _root\n");
             sb.append("        _tt.track_axis = 'TRACK_NEGATIVE_Z'\n");
             sb.append("        _tt.up_axis = 'UP_Y'\n");
-            sb.append("    else:\n");
-            sb.append("        cam_obj.location = (-3.8, 0.0, 2.2)\n");
-            sb.append("        cam_obj.rotation_euler = (math.radians(68), 0, math.radians(-30))\n");
         } else {
             float[] camPos = (spec != null && spec.getCameraPosition() != null && spec.getCameraPosition().length >= 3)
                     ? spec.getCameraPosition() : new float[]{0.0f, -8.5f, 3.8f};
@@ -556,7 +567,7 @@ public class BlenderWorkerAgent {
         sb.append("try:\n");
         sb.append("    sun_data = bpy.data.lights.new('KeySun', type='SUN')\n");
         sb.append("    sun_data.energy = ").append(sunIntensity).append("\n");
-        sb.append("    sun_data.color = (1.0, 0.96, 0.90)\n");
+        sb.append("    sun_data.color = (1.0, 0.98, 0.92)\n");
         sb.append("    sun_obj = bpy.data.objects.new('KeySunLight', sun_data)\n");
         sb.append("    bpy.context.collection.objects.link(sun_obj)\n");
         sb.append("    sun_obj.rotation_euler = (math.radians(").append(sunElevation).append("), 0, math.radians(").append(sunAzimuth).append("))\n");
@@ -596,18 +607,25 @@ public class BlenderWorkerAgent {
         sb.append("# Step 1: Export Interactive 3D GLTF/GLB (Includes Road, Car, and Kinematics)\n");
         sb.append("try:\n");
         sb.append("    for _o in list(bpy.data.objects):\n");
-        sb.append("        if _o.type == 'MESH' and any(_k in _o.name.lower() for _k in ['fog', 'volume', 'domain', 'atmosphere']):\n");
-        sb.append("            bpy.data.objects.remove(_o, do_unlink=True)\n");
-        sb.append("    bpy.ops.export_scene.gltf(filepath='output/model.glb', export_format='GLB', export_apply=False, export_skins=True, export_animations=True, export_materials='EXPORT')\n");
-        sb.append("    print('GLB Export Successful: output/model.glb')\n");
+        sb.append("        if _o.type == 'MESH' and any(_k in _o.name.lower() for _k in ['fog', 'volume', 'domain', 'atmosphere']):\n" +
+                  "            bpy.data.objects.remove(_o, do_unlink=True)\n");
+        sb.append("    bpy.ops.export_scene.gltf(\n" +
+                  "        filepath='output/model.glb',\n" +
+                  "        export_format='GLB',\n" +
+                  "        export_apply=False,\n" +
+                  "        export_skins=True,\n" +
+                  "        export_animations=True,\n" +
+                  "        export_materials='EXPORT'\n" +
+                  "    )\n");
+        sb.append("    print('GLB Export Successful: output/model.glb (Road, Vehicle & Rig Committed)')\n");
         sb.append("except Exception as ge:\n");
         sb.append("    print(f'GLTF export warning: {ge}')\n");
         sb.append("    raise ge\n\n");
 
-        // Step 2: Render Still Preview
-        sb.append("# Step 2: Render Still Snapshot Frame\n");
+        // Step 2: Render Still Preview at Frame 1
+        sb.append("# Step 2: Render Still Snapshot Frame at Frame 1\n");
         sb.append("try:\n");
-        sb.append("    scene.frame_set(25)\n");
+        sb.append("    scene.frame_set(1)\n");
         sb.append("    scene.render.filepath = 'output/render.png'\n");
         sb.append("    bpy.ops.render.render(write_still=True)\n");
         sb.append("    print('Preview snapshot complete: output/render.png')\n");
