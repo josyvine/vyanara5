@@ -40,6 +40,8 @@ import com.example.tools.ToolExecutor;
 import com.example.utils.VynaraLogger;
 
 import java.io.File;
+import java.io.FileInputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -277,6 +279,7 @@ public class ProductionFragment extends Fragment {
                 return false;
             }
 
+            // 1. Resolve Traceback from all available sources
             String traceback = GitHubWorkflowBridge.getLastBlenderTraceback();
             if (traceback == null || traceback.trim().isEmpty()) {
                 traceback = GitHubWorkflowBridge.getLastBlenderError();
@@ -284,30 +287,73 @@ public class ProductionFragment extends Fragment {
             if (traceback == null || traceback.trim().isEmpty()) {
                 traceback = task.getErrorMessage();
             }
+            if (traceback == null || traceback.trim().isEmpty()) {
+                traceback = "ExecutionTimeout or Headless Worker Error: Execution timed out or halted without an explicit Python traceback.";
+            }
 
+            // 2. Resolve Script from all available sources (Task parameters, Operation params, Master script, or Cache file)
             String failedScript = task.getRepairedScript();
+
             if (failedScript == null || failedScript.trim().isEmpty()) {
                 if (task.getOperation() != null) {
                     Object scriptObj = task.getOperation().getParam("bpyScript", null);
+                    if (scriptObj == null) {
+                        scriptObj = task.getOperation().getParam("blender_script", null);
+                    }
                     if (scriptObj != null) {
                         failedScript = String.valueOf(scriptObj);
                     }
                 }
             }
+
+            if (failedScript == null || failedScript.trim().isEmpty()) {
+                Object paramScript = task.getParameters().get("blender_script");
+                if (paramScript == null) {
+                    paramScript = task.getParameters().get("bpyScript");
+                }
+                if (paramScript != null) {
+                    failedScript = String.valueOf(paramScript);
+                }
+            }
+
             if (failedScript == null || failedScript.trim().isEmpty()) {
                 failedScript = BlenderWorkerAgent.getLastMasterScript();
             }
 
-            if (traceback == null || failedScript == null || failedScript.trim().isEmpty()) {
-                VynaraLogger.e("ProductionFragment: Self-correction missing script or traceback context. Cannot repair.");
+            // Fallback: Read from local script cache if uploaded by user
+            if (failedScript == null || failedScript.trim().isEmpty()) {
+                try {
+                    File cachedScript = new File(requireContext().getCacheDir(), "scripts/custom_user_script.py");
+                    if (cachedScript.exists() && cachedScript.length() > 0) {
+                        byte[] b = new byte[(int) cachedScript.length()];
+                        try (FileInputStream fis = new FileInputStream(cachedScript)) {
+                            int r = fis.read(b);
+                            if (r > 0) {
+                                failedScript = new String(b, 0, r, StandardCharsets.UTF_8);
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            if (failedScript == null || failedScript.trim().isEmpty()) {
+                VynaraLogger.e("ProductionFragment: Self-correction missing script context. Cannot repair.");
                 return false;
             }
 
-            handler.post(() -> tvStatus.setText("AI Self-Correction: Repairing Blender script..."));
+            handler.post(() -> tvStatus.setText("AI Self-Correction: Optimizing and repairing script..."));
 
-            String repairPrompt = (prompt != null && !prompt.trim().isEmpty())
-                    ? prompt
-                    : "Custom Blender Python script (Prompt omitted). Fix all runtime and syntax errors.";
+            String repairPrompt;
+            boolean isTimeout = traceback.toLowerCase().contains("timeout") || traceback.contains("600s") || traceback.contains("timed out");
+
+            if (isTimeout) {
+                repairPrompt = "PERFORMANCE OPTIMIZATION: The Blender script timed out during headless execution. " +
+                        "Optimize the code to run in under 60 seconds: batch or join repeated mesh primitives (e.g. windows, floors, mullions, wheels) using bmesh or bpy.ops.object.join(), reduce individual scene object counts, avoid per-object loops with bpy.ops transform applications, and cleanly export to output/model.glb.";
+            } else {
+                repairPrompt = (prompt != null && !prompt.trim().isEmpty())
+                        ? prompt
+                        : "Custom Blender Python script. Fix all runtime errors, missing operators, or syntax issues.";
+            }
 
             String repairedScript = controller.getAiCorrector().correctBlenderScriptSync(repairPrompt, failedScript, traceback);
 
@@ -327,7 +373,10 @@ public class ProductionFragment extends Fragment {
 
             if (task.getOperation() != null) {
                 task.getOperation().setParam("bpyScript", repairedScript);
+                task.getOperation().setParam("blender_script", repairedScript);
             }
+            task.addParameter("bpyScript", repairedScript);
+            task.addParameter("blender_script", repairedScript);
 
             ToolExecutor executor = controller.getToolExecutor() != null 
                     ? controller.getToolExecutor() 
