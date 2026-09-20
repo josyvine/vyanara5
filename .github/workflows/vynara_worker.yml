@@ -115,6 +115,7 @@ jobs:
           w2 = ''
           w3 = ''
           w4 = ''
+          payload = {}
 
           if event_path and os.path.exists(event_path):
               try:
@@ -187,6 +188,29 @@ jobs:
               with open('output/error.txt', 'w', encoding='utf-8') as ef:
                   ef.write(err_msg + '\n')
               sys.exit(1)
+
+          # Determine whether an imported 3D asset model physically exists in the workspace
+          has_imported_model = (
+              os.path.exists('input_model.glb') or os.path.exists('inputs/input_model.glb') or
+              os.path.exists('input_model.fbx') or os.path.exists('inputs/input_model.fbx') or
+              os.path.exists('input_model.obj') or os.path.exists('inputs/input_model.obj') or
+              os.path.exists('input_model.gltf') or os.path.exists('inputs/input_model.gltf')
+          )
+
+          # Determine if this run is a standalone raw procedural script (Option A upload)
+          pipeline_mode = str(payload.get('pipeline_mode', '')).upper()
+          is_explicit_option_a = (
+              bool(payload.get('is_raw_script')) or 
+              bool(payload.get('isRawUserScript')) or 
+              ('bpy_script_b64' in payload and not has_imported_model) or
+              (pipeline_mode == 'OPTION_A' and not has_imported_model)
+          )
+
+          # Check if the script or model is explicitly about a vehicle/car
+          script_lower = bpy_script.lower()
+          is_vehicle_job = has_imported_model or any(k in script_lower for k in ['car_root', 'vehicle_chassis', 'r8', 'wheel_arch', 'highway_road'])
+
+          print(f"Vynara Pipeline Context: is_explicit_option_a={is_explicit_option_a}, has_imported_model={has_imported_model}, is_vehicle_job={is_vehicle_job}")
 
           # --- AST & REGEX AUTO-REPAIR PIPELINE ---
 
@@ -299,52 +323,6 @@ jobs:
           # Auto-Repair 23: Auto-repair scene.render.shutter -> scene.render.motion_blur_shutter
           bpy_script = re.sub(r"(\.render)\.shutter\b", r"\1.motion_blur_shutter", bpy_script)
 
-          # Auto-Repair 24: CAR SCALE NORMALIZATION & TIRE GROUND SNAP (Rules 1 & 3)
-          scale_normalizer_block = (
-              "\n\n# --- RULE 1 & 3: ASSEMBLY-WIDE CAR SCALE NORMALIZATION & GROUND SNAP ---\n"
-              "try:\n"
-              "    import mathutils\n"
-              "    bpy.context.scene.frame_set(1)\n"
-              "    _env_keys = ['road', 'highway', 'asphalt', 'ground', 'stripe', 'lane', 'marking', 'dash', 'guardrail', 'barrier', 'curb', 'sidewalk', 'terrain', 'plane', 'sky', 'light', 'lamp', 'camera']\n"
-              "    _car_meshes = [o for o in bpy.data.objects if o.type == 'MESH' and not any(k in o.name.lower() for k in _env_keys)]\n"
-              "    if _car_meshes:\n"
-              "        for _m in _car_meshes:\n"
-              "            if _m.parent:\n"
-              "                _mat = _m.matrix_world.copy()\n"
-              "                _m.parent = None\n"
-              "                _m.matrix_world = _mat\n"
-              "        _min_x, _min_y, _min_z = float('inf'), float('inf'), float('inf')\n"
-              "        _max_x, _max_y, _max_z = float('-inf'), float('-inf'), float('-inf')\n"
-              "        for _m in _car_meshes:\n"
-              "            for _corner in _m.bound_box:\n"
-              "                _w = _m.matrix_world @ mathutils.Vector(_corner)\n"
-              "                _min_x = min(_min_x, _w.x); _max_x = max(_max_x, _w.x)\n"
-              "                _min_y = min(_min_y, _w.y); _max_y = max(_max_y, _w.y)\n"
-              "                _min_z = min(_min_z, _w.z); _max_z = max(_max_z, _w.z)\n"
-              "        _dim_x = _max_x - _min_x\n"
-              "        _dim_y = _max_y - _min_y\n"
-              "        _car_length = max(_dim_x, _dim_y)\n"
-              "        if _car_length > 0.001:\n"
-              "            _ratio = 4.5 / _car_length\n"
-              "            print(f'Assembly Normalizer: Scaling car length from {_car_length:.3f}m to 4.5m (ratio={_ratio:.6f})')\n"
-              "            _center_x = (_min_x + _max_x) * 0.5\n"
-              "            _center_y = (_min_y + _max_y) * 0.5\n"
-              "            _bottom_z = _min_z\n"
-              "            for _m in _car_meshes:\n"
-              "                _m.location.x = (_m.location.x - _center_x) * _ratio\n"
-              "                _m.location.y = (_m.location.y - _center_y) * _ratio\n"
-              "                _m.location.z = (_m.location.z - _bottom_z) * _ratio\n"
-              "                _m.scale = (_m.scale.x * _ratio, _m.scale.y * _ratio, _m.scale.z * _ratio)\n"
-              "                bpy.context.view_layer.objects.active = _m\n"
-              "                bpy.ops.object.transform_apply(location=True, rotation=False, scale=True)\n"
-              "            print('Assembly Normalizer: Scale transforms applied, tires resting flush at Z=0.0')\n"
-              "except Exception as _sn_err: print(f'Assembly scale normalizer note: {_sn_err}')\n"
-          )
-          if '# --- STEP 1:' in bpy_script:
-              bpy_script = bpy_script.replace('# --- STEP 1:', scale_normalizer_block + '\n# --- STEP 1:')
-          else:
-              bpy_script += scale_normalizer_block
-
           # Auto-Repair 25: Neutralize cycles get_devices() NoneType crash & enforce headless CPU device
           bpy_script = re.sub(
               r"^[ \t]*.*cycles.*(?:device\s*=\s*['\"]GPU['\"]|get_devices\(\)).*$",
@@ -371,95 +349,126 @@ jobs:
               bpy_script
           )
 
-          # Auto-Repair 27: ROAD SCALE & ALIGNMENT (Rule 2: 14m wide x 250m long, Z=0.0, dashes at Z=0.005)
-          road_clamp_snippet = (
-              "\n\n# --- RULE 2: ROAD SCALE & ALIGNMENT ---\n"
-              "try:\n"
-              "    _road_obj = None\n"
-              "    for _o in list(bpy.data.objects):\n"
-              "        if _o.type == 'MESH' and any(k in _o.name.lower() for k in ['road', 'highway', 'asphalt']):\n"
-              "            _road_obj = _o\n"
-              "            break\n"
-              "    if not _road_obj:\n"
-              "        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, 125.0, 0.0))\n"
-              "        _road_obj = bpy.context.active_object\n"
-              "        _road_obj.name = 'Highway_Road'\n"
-              "    _road_obj.location = (0.0, 125.0, 0.0)\n"
-              "    _road_obj.rotation_euler = (0.0, 0.0, 0.0)\n"
-              "    _road_obj.dimensions = (14.0, 250.0, 0.0)\n"
-              "    bpy.context.view_layer.objects.active = _road_obj\n"
-              "    bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)\n"
-              "    # Rebuild center lane dashes at Z=0.005 with normal pointing straight UP (0,0,1)\n"
-              "    for _o in list(bpy.data.objects):\n"
-              "        if _o.type == 'MESH' and any(k in _o.name.lower() for k in ['stripe', 'lane', 'marking', 'dash']):\n"
-              "            bpy.data.objects.remove(_o, do_unlink=True)\n"
-              "    _dash_mat = bpy.data.materials.new(name='Lane_Marking_Mat')\n"
-              "    _dash_mat.use_nodes = True\n"
-              "    _d_bsdf = _dash_mat.node_tree.nodes.get('Principled BSDF')\n"
-              "    if _d_bsdf:\n"
-              "        _d_bsdf.inputs['Base Color'].default_value = (1.0, 1.0, 1.0, 1.0)\n"
-              "        _d_bsdf.inputs['Roughness'].default_value = 0.2\n"
-              "    for _idx in range(1, 40):\n"
-              "        _dy = _idx * 6.0\n"
-              "        if _dy > 245.0: break\n"
-              "        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, _dy, 0.005))\n"
-              "        _d = bpy.context.active_object\n"
-              "        _d.name = f'Lane_Dash_{_idx}'\n"
-              "        _d.rotation_euler = (0.0, 0.0, 0.0)\n"
-              "        _d.dimensions = (0.2, 3.0, 0.0)\n"
-              "        if _d.data.materials: _d.data.materials[0] = _dash_mat\n"
-              "        else: _d.data.materials.append(_dash_mat)\n"
-              "    print('Road & Lane Markings: 14m x 250m highway verified at Z=0.0 with center dashes at Z=0.005')\n"
-              "except Exception as _rc_err: print(f'Road clamp note: {_rc_err}')\n"
-          )
-          bpy_script += road_clamp_snippet
+          # -------------------------------------------------------------------------
+          # CONDITIONAL VEHICLE AUTO-REPAIRS: ONLY FOR IMPORTED 3D VEHICLES / CARS
+          # (BYPASSED COMPLETELY FOR RAW PROCEDURAL PYTHON UPLOADS / OPTION A)
+          # -------------------------------------------------------------------------
+          if is_vehicle_job and not is_explicit_option_a:
+              print("Vynara Pipeline: Ingesting Vehicle Post-Processing (4.5m Scale, Road, and Driving Rig)...")
 
-          # Auto-Repair 28: MASTER ROOT PARENTING, PLACEMENT & DRIVING ANIMATION (Rules 3 & 4)
-          root_parent_snippet = (
-              "\n\n# --- RULE 3 & 4: MASTER ROOT PARENTING, PLACEMENT & DRIVING ANIMATION ---\n"
-              "try:\n"
-              "    _root = bpy.data.objects.get('Model_Root')\n"
-              "    if not _root:\n"
-              "        _root = bpy.data.objects.new('Model_Root', None)\n"
-              "        _root.empty_display_type = 'PLAIN_AXES'\n"
-              "        bpy.context.collection.objects.link(_root)\n"
-              "    _env_keys = ['road', 'highway', 'asphalt', 'ground', 'stripe', 'lane', 'marking', 'dash', 'guardrail', 'barrier', 'curb', 'sidewalk', 'terrain', 'plane', 'sky', 'light', 'lamp', 'camera']\n"
-              "    _car_meshes = [o for o in bpy.data.objects if o.type == 'MESH' and not any(k in o.name.lower() for k in _env_keys)]\n"
-              "    _root.animation_data_clear()\n"
-              "    _root.location = (0.0, 0.0, 0.0)\n"
-              "    _root.rotation_euler = (0.0, 0.0, 0.0)\n"
-              "    _root.scale = (1.0, 1.0, 1.0)\n"
-              "    bpy.context.view_layer.update()\n"
-              "    for _o in _car_meshes:\n"
-              "        _o.parent = _root\n"
-              "        _o.matrix_parent_inverse = _root.matrix_world.inverted()\n"
-              "    # Drive along Y-axis: Y = 5.0 at frame 1 to Y = 80.0 at frame 60\n"
-              "    bpy.context.scene.frame_start = 1\n"
-              "    bpy.context.scene.frame_end = 60\n"
-              "    _root.location = (0.0, 5.0, 0.0)\n"
-              "    _root.keyframe_insert(data_path='location', frame=1)\n"
-              "    _root.location = (0.0, 80.0, 0.0)\n"
-              "    _root.keyframe_insert(data_path='location', frame=60)\n"
-              "    if _root.animation_data and _root.animation_data.action:\n"
-              "        for _fc in _root.animation_data.action.fcurves:\n"
-              "            for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n"
-              "    # Animate wheel spin around axle (distance = 75m, radius = 0.35m -> -214.28 rad)\n"
-              "    _wheel_keys = ['wheel', 'tire', 'rim', 'tyre', 'disc']\n"
-              "    _wheel_objs = [m for m in _car_meshes if any(wk in m.name.lower() for wk in _wheel_keys)]\n"
-              "    for _w in _wheel_objs:\n"
-              "        _w.rotation_mode = 'XYZ'\n"
-              "        _w.animation_data_clear()\n"
-              "        _w.rotation_euler.x = 0.0\n"
-              "        _w.keyframe_insert(data_path='rotation_euler', frame=1)\n"
-              "        _w.rotation_euler.x = -214.28\n"
-              "        _w.keyframe_insert(data_path='rotation_euler', frame=60)\n"
-              "        if _w.animation_data and _w.animation_data.action:\n"
-              "            for _fc in _w.animation_data.action.fcurves:\n"
-              "                for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n"
-              "    print(f'Root Motion: Animated Model_Root (Y: 5m -> 80m) with {len(_wheel_objs)} spinning wheel sub-meshes')\n"
-              "except Exception as _rp_err: print(f'Root parenting note: {_rp_err}')\n"
-          )
-          bpy_script += root_parent_snippet
+              # Auto-Repair 24 & 28: Non-Destructive Assembly Root Parenting, Scaling & Ground Snap
+              # (Fixes Issue 1: Does NOT apply transform destructively to child meshes, preventing tilt/skew)
+              vehicle_root_block = (
+                  "\n\n# --- NON-DESTRUCTIVE VEHICLE ASSEMBLY NORMALIZER & DRIVING RIG ---\n"
+                  "try:\n"
+                  "    import mathutils, bpy\n"
+                  "    bpy.context.scene.frame_set(1)\n"
+                  "    _env_keys = ['road', 'highway', 'asphalt', 'ground', 'stripe', 'lane', 'marking', 'dash', 'guardrail', 'barrier', 'curb', 'sidewalk', 'terrain', 'plane', 'sky', 'light', 'lamp', 'camera']\n"
+                  "    _car_meshes = [o for o in bpy.data.objects if o.type == 'MESH' and not any(k in o.name.lower() for k in _env_keys)]\n"
+                  "    if _car_meshes:\n"
+                  "        # 1. Compute aggregate bounding box in world space\n"
+                  "        _min_x, _min_y, _min_z = float('inf'), float('inf'), float('inf')\n"
+                  "        _max_x, _max_y, _max_z = float('-inf'), float('-inf'), float('-inf')\n"
+                  "        for _m in _car_meshes:\n"
+                  "            for _corner in _m.bound_box:\n"
+                  "                _w = _m.matrix_world @ mathutils.Vector(_corner)\n"
+                  "                _min_x = min(_min_x, _w.x); _max_x = max(_max_x, _w.x)\n"
+                  "                _min_y = min(_min_y, _w.y); _max_y = max(_max_y, _w.y)\n"
+                  "                _min_z = min(_min_z, _w.z); _max_z = max(_max_z, _w.z)\n"
+                  "        _dim_x = _max_x - _min_x; _dim_y = _max_y - _min_y; _dim_z = _max_z - _min_z\n"
+                  "        _car_length = max(_dim_x, _dim_y)\n"
+                  "        _center_x = (_min_x + _max_x) * 0.5\n"
+                  "        _center_y = (_min_y + _max_y) * 0.5\n"
+                  "        _bottom_z = _min_z\n"
+                  "        # 2. Bind all car sub-meshes to Model_Root without destroying relative child transforms\n"
+                  "        _root = bpy.data.objects.get('Model_Root')\n"
+                  "        if not _root:\n"
+                  "            _root = bpy.data.objects.new('Model_Root', None)\n"
+                  "            _root.empty_display_type = 'PLAIN_AXES'\n"
+                  "            bpy.context.collection.objects.link(_root)\n"
+                  "        _root.animation_data_clear()\n"
+                  "        _root.location = (_center_x, _center_y, _bottom_z)\n"
+                  "        _root.rotation_euler = (0.0, 0.0, 0.0)\n"
+                  "        _root.scale = (1.0, 1.0, 1.0)\n"
+                  "        bpy.context.view_layer.update()\n"
+                  "        for _m in _car_meshes:\n"
+                  "            if not _m.parent:\n"
+                  "                _m.parent = _root\n"
+                  "                _m.matrix_parent_inverse = _root.matrix_world.inverted()\n"
+                  "        # 3. Scale assembly rigidly to 4.5m total automotive length\n"
+                  "        if _car_length > 0.001:\n"
+                  "            _scale_factor = 4.5 / _car_length\n"
+                  "            _root.scale = (_scale_factor, _scale_factor, _scale_factor)\n"
+                  "            print(f'Vehicle Normalizer: Rigidly scaled Model_Root from {_car_length:.3f}m to 4.5m length')\n"
+                  "        # 4. Center car in driving lane at X=0, snap tires flush to Z=0, and start at Y=5.0\n"
+                  "        bpy.context.scene.frame_start = 1\n"
+                  "        bpy.context.scene.frame_end = 60\n"
+                  "        _root.location = (0.0, 5.0, 0.0)\n"
+                  "        _root.keyframe_insert(data_path='location', frame=1)\n"
+                  "        _root.location = (0.0, 80.0, 0.0)\n"
+                  "        _root.keyframe_insert(data_path='location', frame=60)\n"
+                  "        if _root.animation_data and _root.animation_data.action:\n"
+                  "            for _fc in _root.animation_data.action.fcurves:\n"
+                  "                for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n"
+                  "        # 5. Animate wheel rotation proportional to distance (75m / 0.35m radius -> -214.28 rad)\n"
+                  "        _wheel_keys = ['wheel', 'tire', 'rim', 'tyre', 'disc']\n"
+                  "        _wheel_objs = [m for m in _car_meshes if any(wk in m.name.lower() for wk in _wheel_keys)]\n"
+                  "        for _w in _wheel_objs:\n"
+                  "            _w.rotation_mode = 'XYZ'\n"
+                  "            _w.animation_data_clear()\n"
+                  "            _w.rotation_euler.x = 0.0\n"
+                  "            _w.keyframe_insert(data_path='rotation_euler', frame=1)\n"
+                  "            _w.rotation_euler.x = -214.28\n"
+                  "            _w.keyframe_insert(data_path='rotation_euler', frame=60)\n"
+                  "            if _w.animation_data and _w.animation_data.action:\n"
+                  "                for _fc in _w.animation_data.action.fcurves:\n"
+                  "                    for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n"
+                  "        print(f'Vehicle Rig: Centered at X=0, flush at Z=0, animated Y 5m->80m with {len(_wheel_objs)} wheels')\n"
+                  "except Exception as _veh_err: print(f'Vehicle rig note: {_veh_err}')\n"
+              )
+              bpy_script += vehicle_root_block
+
+              # Auto-Repair 27: Road & Lane Markings (Only for Vehicle Scenes)
+              road_clamp_snippet = (
+                  "\n\n# --- MULTI-LANE HIGHWAY ROAD & LANE MARKINGS ---\n"
+                  "try:\n"
+                  "    _road_obj = None\n"
+                  "    for _o in list(bpy.data.objects):\n"
+                  "        if _o.type == 'MESH' and any(k in _o.name.lower() for k in ['road', 'highway', 'asphalt']):\n"
+                  "            _road_obj = _o; break\n"
+                  "    if not _road_obj:\n"
+                  "        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, 125.0, 0.0))\n"
+                  "        _road_obj = bpy.context.active_object\n"
+                  "        _road_obj.name = 'Highway_Road'\n"
+                  "    _road_obj.location = (0.0, 125.0, 0.0)\n"
+                  "    _road_obj.rotation_euler = (0.0, 0.0, 0.0)\n"
+                  "    _road_obj.dimensions = (14.0, 250.0, 0.0)\n"
+                  "    bpy.context.view_layer.objects.active = _road_obj\n"
+                  "    bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)\n"
+                  "    for _o in list(bpy.data.objects):\n"
+                  "        if _o.type == 'MESH' and any(k in _o.name.lower() for k in ['stripe', 'lane', 'marking', 'dash']):\n"
+                  "            bpy.data.objects.remove(_o, do_unlink=True)\n"
+                  "    _dash_mat = bpy.data.materials.new(name='Lane_Marking_Mat')\n"
+                  "    _dash_mat.use_nodes = True\n"
+                  "    _d_bsdf = _dash_mat.node_tree.nodes.get('Principled BSDF')\n"
+                  "    if _d_bsdf:\n"
+                  "        _d_bsdf.inputs['Base Color'].default_value = (1.0, 1.0, 1.0, 1.0)\n"
+                  "        _d_bsdf.inputs['Roughness'].default_value = 0.2\n"
+                  "    for _idx in range(1, 40):\n"
+                  "        _dy = _idx * 6.0\n"
+                  "        if _dy > 245.0: break\n"
+                  "        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, _dy, 0.005))\n"
+                  "        _d = bpy.context.active_object\n"
+                  "        _d.name = f'Lane_Dash_{_idx}'\n"
+                  "        _d.rotation_euler = (0.0, 0.0, 0.0)\n"
+                  "        _d.dimensions = (0.2, 3.0, 0.0)\n"
+                  "        if _d.data.materials: _d.data.materials[0] = _dash_mat\n"
+                  "        else: _d.data.materials.append(_dash_mat)\n"
+                  "except Exception as _rc_err: print(f'Road generation note: {_rc_err}')\n"
+              )
+              bpy_script += road_clamp_snippet
+          else:
+              print("Vynara Pipeline: Option A / Non-vehicle job detected. Bypassing car normalizer, road, and driving rig.")
 
           # Auto-Repair 10: Animation-Safe GLTF/GLB Exporter
           if 'export_scene.gltf' not in bpy_script:
@@ -478,35 +487,20 @@ jobs:
           else:
               bpy_script = bpy_script.replace("export_apply=True", "export_apply=False")
 
-          # Auto-Repair 11: CINEMATIC CAMERA (Rule 5: Low dramatic 3/4 front angle tracking camera moving with car)
+          # Auto-Repair 11: Production Snapshot Framing (Always Single Frame Preview)
           if 'output/render.png' not in bpy_script:
               bpy_script += (
-                  "\n\n# --- RULE 5: CINEMATIC TRACKING CAMERA & SNAPSHOT ---\n"
+                  "\n\n# Production Snapshot Frame\n"
                   "try:\n"
                   "    import os, math, bpy\n"
-                  "    _root = bpy.data.objects.get('Model_Root')\n"
                   "    _cam = bpy.context.scene.camera\n"
                   "    if not _cam:\n"
                   "        _cam_data = bpy.data.cameras.new('CinematicCamera')\n"
                   "        _cam = bpy.data.objects.new('CinematicCamera', _cam_data)\n"
                   "        bpy.context.collection.objects.link(_cam)\n"
                   "        bpy.context.scene.camera = _cam\n"
-                  "    _cam.data.lens = 35.0\n"
-                  "    _cam.data.clip_end = 500.0\n"
-                  "    _cam.constraints.clear()\n"
-                  "    _cam.animation_data_clear()\n"
-                  "    if _root:\n"
-                  "        _tt = _cam.constraints.new(type='TRACK_TO')\n"
-                  "        _tt.target = _root\n"
-                  "        _tt.track_axis = 'TRACK_NEGATIVE_Z'\n"
-                  "        _tt.up_axis = 'UP_Y'\n"
-                  "    _cam.location = (-2.8, 10.5, 0.95)\n"
-                  "    _cam.keyframe_insert(data_path='location', frame=1)\n"
-                  "    _cam.location = (-2.8, 85.5, 0.95)\n"
-                  "    _cam.keyframe_insert(data_path='location', frame=60)\n"
-                  "    if _cam.animation_data and _cam.animation_data.action:\n"
-                  "        for _fc in _cam.animation_data.action.fcurves:\n"
-                  "            for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n"
+                  "        _cam.location = (-2.8, 10.5, 2.5)\n"
+                  "        _cam.rotation_euler = (math.radians(70), 0, math.radians(-15))\n"
                   "    bpy.context.scene.render.engine = 'CYCLES'\n"
                   "    bpy.context.scene.cycles.device = 'CPU'\n"
                   "    bpy.context.scene.cycles.samples = 16\n"
@@ -519,16 +513,22 @@ jobs:
                   "except Exception as snap_e: print(f'Snapshot generation note: {snap_e}')\n"
               )
 
-          # Auto-Repair 21: Fast Cinematic Animation Video Exporter with CPU Cycles safety
+          # Auto-Repair 21: CONDITIONAL Animation Video Exporter
+          # (Fixes Issue 2: Only renders animation IF the scene actually has intentional keyframe actions!)
           anim_render_snippet = (
-              "\n\n# Dynamic Cinematic Animation Video Exporter\n"
+              "\n\n# Dynamic Animation Video Exporter (Only for scenes with actual keyframes)\n"
               "try:\n"
               "    import bpy, os\n"
               "    _sc = bpy.context.scene\n"
-              "    if _sc.camera and _sc.frame_end > _sc.frame_start and not os.path.exists('output/cinematic.mp4'):\n"
+              "    # Inspect scene objects to verify if intentional keyframe animation exists\n"
+              "    _has_real_anim = any(\n"
+              "        (obj.animation_data and obj.animation_data.action and len(obj.animation_data.action.fcurves) > 0)\n"
+              "        for obj in bpy.data.objects\n"
+              "    )\n"
+              "    if _has_real_anim and _sc.camera and not os.path.exists('output/cinematic.mp4'):\n"
               "        if (_sc.frame_end - _sc.frame_start) > 60:\n"
               "            _sc.frame_end = _sc.frame_start + 60\n"
-              "        print(f'Rendering Cinematic MP4 Animation: frames {_sc.frame_start} to {_sc.frame_end}...')\n"
+              "        print(f'Active Animation Detected: Rendering MP4 sequence frames {_sc.frame_start} to {_sc.frame_end}...')\n"
               "        _sc.render.resolution_x = 960\n"
               "        _sc.render.resolution_y = 540\n"
               "        _sc.render.image_settings.file_format = 'FFMPEG'\n"
@@ -543,6 +543,8 @@ jobs:
               "        _sc.cycles.use_denoising = False\n"
               "        bpy.ops.render.render(animation=True)\n"
               "        print('Cinematic MP4 video rendered successfully: output/cinematic.mp4')\n"
+              "    else:\n"
+              "        print('Static Scene: No keyframe animation found. Skipping MP4 animation render to avoid delay.')\n"
               "except Exception as _anim_err: print(f'Cinematic video export note: {_anim_err}')\n"
           )
           bpy_script += anim_render_snippet
