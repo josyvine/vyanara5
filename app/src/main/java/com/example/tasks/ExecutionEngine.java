@@ -8,7 +8,6 @@ import com.example.utils.VynaraLogger;
 import com.example.utils.VynaraLogger.LogLevel;
 
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -107,15 +106,6 @@ public class ExecutionEngine {
                     boolean success = false;
                     try {
                         if (task.getOperation() != null) {
-                            // Mirror operation parameters to task parameters so script context is preserved
-                            if (task.getOperation().getParameters() != null) {
-                                for (Map.Entry<String, Object> entry : task.getOperation().getParameters().entrySet()) {
-                                    if (!task.getParameters().containsKey(entry.getKey()) || task.getParameters().get(entry.getKey()) == null) {
-                                        task.addParameter(entry.getKey(), entry.getValue());
-                                    }
-                                }
-                            }
-
                             String toolId = task.getOperation().getToolId();
                             VynaraLogger.execution("Mapping task to registered Tool ID: " + toolId);
                             
