@@ -379,18 +379,6 @@ public class StudioFragment extends Fragment {
             }
         }
 
-        // Also check character animation players
-        if (runtime != null && runtime.getCharacterManager() != null) {
-            for (Character c : runtime.getCharacterManager().getCharacterMap().values()) {
-                if (c != null && c.getAnimationPlayer() != null && c.getAnimationPlayer().getCurrentClip() != null) {
-                    float cd = c.getAnimationPlayer().getCurrentClip().getDuration();
-                    if (cd > maxTrackDuration) {
-                        maxTrackDuration = cd;
-                    }
-                }
-            }
-        }
-
         final float finalDuration = maxTrackDuration;
         if (finalDuration > 0.05f) {
             maxTimelineDuration = finalDuration;
