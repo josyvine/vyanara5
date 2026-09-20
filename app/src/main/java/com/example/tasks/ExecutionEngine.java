@@ -8,6 +8,7 @@ import com.example.utils.VynaraLogger;
 import com.example.utils.VynaraLogger.LogLevel;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -106,13 +107,26 @@ public class ExecutionEngine {
                     boolean success = false;
                     try {
                         if (task.getOperation() != null) {
+                            // Mirror operation parameters to task parameters so script context is preserved
+                            if (task.getOperation().getParameters() != null) {
+                                for (Map.Entry<String, Object> entry : task.getOperation().getParameters().entrySet()) {
+                                    if (!task.getParameters().containsKey(entry.getKey()) || task.getParameters().get(entry.getKey()) == null) {
+                                        task.addParameter(entry.getKey(), entry.getValue());
+                                    }
+                                }
+                            }
+
                             String toolId = task.getOperation().getToolId();
                             VynaraLogger.execution("Mapping task to registered Tool ID: " + toolId);
                             
                             if (toolExecutor != null) {
                                 success = toolExecutor.executeOperation(task.getOperation());
+                                if (!success && task.getErrorMessage() == null) {
+                                    task.setErrorMessage("Tool execution failed: " + toolId);
+                                }
                             } else {
                                 VynaraLogger.system("Execution failure: ToolExecutor reference is null.");
+                                task.setErrorMessage("Execution failure: ToolExecutor reference is null.");
                                 success = false;
                             }
                         } else {
@@ -128,6 +142,11 @@ public class ExecutionEngine {
 
                     // SOLUTION B: Intercept failure on Run 1 to trigger AI Self-Correction loop
                     if (!success && failureInterceptor != null) {
+                        if (task.getErrorMessage() == null) {
+                            String failedToolId = task.getOperation() != null ? task.getOperation().getToolId() : "null";
+                            task.setErrorMessage("Tool execution failed: " + failedToolId);
+                        }
+
                         VynaraLogger.system("ExecutionEngine: Intercepting failure on Task [" + task.getId() + "] for automated self-correction...");
                         task.setProgressPercent(50);
                         notifyTaskUpdated(task, graph, callback);
@@ -135,6 +154,7 @@ public class ExecutionEngine {
                         boolean resolvedByAi = failureInterceptor.onTaskFailed(task, graph);
                         if (resolvedByAi) {
                             success = true;
+                            task.setErrorMessage(null);
                             VynaraLogger.task("ExecutionEngine: Task [" + task.getId() + "] successfully resolved via AI Self-Correction loop.");
                         }
                     }
