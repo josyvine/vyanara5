@@ -52,7 +52,7 @@ public class StudioFragment extends Fragment {
     private ImageButton btnAnimPlay;
     private boolean isPlaying = false;
     private float currentPlaybackTime = 0.0f;
-    private float maxTimelineDuration = 3.5f;
+    private float maxTimelineDuration = 0.0f;
 
     private android.os.Handler animHandler;
     private Runnable animRunnable;
@@ -100,6 +100,7 @@ public class StudioFragment extends Fragment {
         setupViewportTouchOrbitGesture();
 
         updateStudioStatsUI();
+        syncActiveSceneAnimationDuration();
 
         // Undo & Redo transaction history
         View btnUndo = view.findViewById(R.id.btn_undo);
@@ -107,6 +108,7 @@ public class StudioFragment extends Fragment {
             btnUndo.setOnClickListener(v -> {
                 if (runtime.getUndoManager().undo()) {
                     updateStudioStatsUI();
+                    syncActiveSceneAnimationDuration();
                     Toast.makeText(getContext(), "Undo Successful", Toast.LENGTH_SHORT).show();
                 } else {
                     Toast.makeText(getContext(), "Nothing to undo", Toast.LENGTH_SHORT).show();
@@ -119,6 +121,7 @@ public class StudioFragment extends Fragment {
             btnRedo.setOnClickListener(v -> {
                 if (runtime.getRedoManager().redo()) {
                     updateStudioStatsUI();
+                    syncActiveSceneAnimationDuration();
                     Toast.makeText(getContext(), "Redo Successful", Toast.LENGTH_SHORT).show();
                 } else {
                     Toast.makeText(getContext(), "Nothing to redo", Toast.LENGTH_SHORT).show();
@@ -221,11 +224,11 @@ public class StudioFragment extends Fragment {
             });
         }
 
-        // Universal animation loop: updates scrubber, time text, and node transform keyframes across all scenes
+        // Universal animation loop: updates scrubber, time text, and node transform keyframes across animated scenes
         animRunnable = new Runnable() {
             @Override
             public void run() {
-                if (isPlaying) {
+                if (isPlaying && maxTimelineDuration > 0.05f) {
                     currentPlaybackTime += 0.033f;
                     if (currentPlaybackTime > maxTimelineDuration) {
                         currentPlaybackTime = 0.0f; // Loop seamlessly
@@ -262,12 +265,22 @@ public class StudioFragment extends Fragment {
                     }
 
                     animHandler.postDelayed(this, 33);
+                } else {
+                    isPlaying = false;
+                    if (btnAnimPlay != null) {
+                        btnAnimPlay.setImageResource(android.R.drawable.ic_media_play);
+                    }
                 }
             }
         };
 
         if (btnAnimPlay != null) {
             btnAnimPlay.setOnClickListener(v -> {
+                if (maxTimelineDuration <= 0.05f) {
+                    Toast.makeText(getContext(), "Static 3D Scene (No Animation Tracks)", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+
                 isPlaying = !isPlaying;
                 btnAnimPlay.setImageResource(isPlaying ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play);
                 
@@ -293,9 +306,15 @@ public class StudioFragment extends Fragment {
             seekbarTimeline.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
                 @Override
                 public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                    if (maxTimelineDuration <= 0.05f) {
+                        return;
+                    }
+
                     float seconds = (progress / 100.0f) * maxTimelineDuration;
                     currentPlaybackTime = seconds;
-                    tvAnimTime.setText(String.format(Locale.US, "%.1fs / %.1fs", seconds, maxTimelineDuration));
+                    if (tvAnimTime != null) {
+                        tvAnimTime.setText(String.format(Locale.US, "%.1fs / %.1fs", seconds, maxTimelineDuration));
+                    }
                     
                     if (fromUser) {
                         // Seek node animations on user timeline scrub
@@ -336,6 +355,71 @@ public class StudioFragment extends Fragment {
                 dialog.show(getChildFragmentManager(), "AiAssistantDialog");
             });
         }
+    }
+
+    /**
+     * Inspects all active scene graph objects and skeletal character players.
+     * If animation tracks exist, configures the timeline scrubber matching the model's actual duration.
+     * If the model is a static procedural asset (e.g. skyscraper, villa, furniture), disables the scrubber.
+     */
+    public void syncActiveSceneAnimationDuration() {
+        if (engine == null || engine.getSceneManager() == null) return;
+        Scene activeScene = engine.getSceneManager().getActiveScene();
+        if (activeScene == null) return;
+
+        float maxTrackDuration = 0f;
+        synchronized (activeScene) {
+            for (SceneObject obj : activeScene.getFlatObjectList()) {
+                if (obj != null) {
+                    float d = obj.getMaxAnimationDuration();
+                    if (d > maxTrackDuration) {
+                        maxTrackDuration = d;
+                    }
+                }
+            }
+        }
+
+        // Also check character animation players
+        if (runtime != null && runtime.getCharacterManager() != null) {
+            for (Character c : runtime.getCharacterManager().getCharacterMap().values()) {
+                if (c != null && c.getAnimationPlayer() != null && c.getAnimationPlayer().getCurrentClip() != null) {
+                    float cd = c.getAnimationPlayer().getCurrentClip().getDuration();
+                    if (cd > maxTrackDuration) {
+                        maxTrackDuration = cd;
+                    }
+                }
+            }
+        }
+
+        final float finalDuration = maxTrackDuration;
+        if (finalDuration > 0.05f) {
+            maxTimelineDuration = finalDuration;
+            if (tvAnimTime != null) {
+                tvAnimTime.setText(String.format(Locale.US, "%.1fs / %.1fs", currentPlaybackTime, maxTimelineDuration));
+            }
+            if (seekbarTimeline != null) {
+                seekbarTimeline.setEnabled(true);
+                seekbarTimeline.setAlpha(1.0f);
+            }
+        } else {
+            // Pure static model (e.g. skyscraper, villa, prop)
+            maxTimelineDuration = 0f;
+            currentPlaybackTime = 0f;
+            isPlaying = false;
+            animHandler.removeCallbacks(animRunnable);
+            if (btnAnimPlay != null) {
+                btnAnimPlay.setImageResource(android.R.drawable.ic_media_play);
+            }
+            if (tvAnimTime != null) {
+                tvAnimTime.setText("0.0s / Static");
+            }
+            if (seekbarTimeline != null) {
+                seekbarTimeline.setProgress(0);
+                seekbarTimeline.setEnabled(false);
+                seekbarTimeline.setAlpha(0.35f);
+            }
+        }
+        updateStudioStatsUI();
     }
 
     private void setupViewportTouchOrbitGesture() {
@@ -594,6 +678,7 @@ public class StudioFragment extends Fragment {
                 engine.getSceneManager().updateWorldTransforms();
                 runtime.getTransactionManager().commitTransaction();
                 updateStudioStatsUI();
+                syncActiveSceneAnimationDuration();
                 return true;
             }
             runtime.getTransactionManager().rollbackTransaction();
@@ -616,6 +701,7 @@ public class StudioFragment extends Fragment {
                 runtime.getCharacterManager().getCharacterMap().clear();
             }
             updateStudioStatsUI();
+            syncActiveSceneAnimationDuration();
         }
     }
 
@@ -650,10 +736,10 @@ public class StudioFragment extends Fragment {
             }
 
             // Dynamically set timeline length matching imported model tracks
-            if (detectedMaxDuration > 0.1f) {
+            if (detectedMaxDuration > 0.05f) {
                 maxTimelineDuration = detectedMaxDuration;
             } else {
-                maxTimelineDuration = 3.5f;
+                maxTimelineDuration = 0.0f;
             }
             currentPlaybackTime = 0.0f;
 
@@ -673,12 +759,7 @@ public class StudioFragment extends Fragment {
             if (getActivity() != null) {
                 getActivity().runOnUiThread(() -> {
                     updateStudioStatsUI();
-                    if (tvAnimTime != null) {
-                        tvAnimTime.setText(String.format(Locale.US, "0.0s / %.1fs", maxTimelineDuration));
-                    }
-                    if (seekbarTimeline != null) {
-                        seekbarTimeline.setProgress(0);
-                    }
+                    syncActiveSceneAnimationDuration();
                     String msg = "Imported: " + glbFile.getName();
                     if (currentRenderImageFile != null) {
                         msg += " (Cycles Render Ready)";
@@ -738,6 +819,7 @@ public class StudioFragment extends Fragment {
         super.onResume();
         if (glSurfaceView != null) glSurfaceView.onResume();
         updateStudioStatsUI();
+        syncActiveSceneAnimationDuration();
     }
 
     @Override
