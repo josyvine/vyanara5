@@ -469,7 +469,8 @@ public class BlenderWorkerAgent {
             sb.append("        for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n\n");
 
             sb.append("# Animate Wheel Spin around axles proportional to distance (75m displacement -> -214.28 rad)\n");
-            sb.append("_wheels = [o for o in _car_objs if any(wk in o.name.lower() for wk in ['wheel', 'tire', 'rim', 'tyre', 'disc'])]\n");
+            sb.append("_wheel_keys = ['wheel', 'tire', 'rim', 'tyre', 'disc']\n");
+            sb.append("_wheels = [o for o in _car_objs if any(wk in o.name.lower() for wk in _wheel_keys)]\n");
             sb.append("for _wo in _wheels:\n");
             sb.append("    _wo.rotation_mode = 'XYZ'\n");
             sb.append("    _wo.animation_data_clear()\n");
@@ -499,8 +500,9 @@ public class BlenderWorkerAgent {
     }
 
     /**
-     * Builds Worker 3: Cinematics, Low 3/4 Front Angle Tracking Camera moving with the car down the highway (Rule 5),
-     * Golden-Hour Sun Lighting, 180-deg Optical Motion Blur, AgX Color Management, and MP4 Video Rendering.
+     * Builds Worker 3: Cinematics, Low 3/4 Front Angle Tracking Camera parented to Model_Root (Rule 5),
+     * Natural Sun Lighting with Ambient Sky Radiance, 180-deg Optical Motion Blur, AgX Color Management,
+     * Complete Scene GLB Export (including Road), and MP4 Video Rendering.
      */
     private static String buildWorker3LightingAndRenderScript(AIDirectorSpec spec) {
         StringBuilder sb = new StringBuilder();
@@ -527,22 +529,20 @@ public class BlenderWorkerAgent {
         sb.append("    bpy.context.scene.camera = cam_obj\n\n");
 
         if (isVehicle) {
-            sb.append("    # Place camera tracking car from low, dramatic 3/4 front angle moving with car down highway\n");
+            sb.append("    # Place camera tracking car parented to Model_Root at dynamic 3/4 front-quarter angle\n");
             sb.append("    _root = bpy.data.objects.get('Model_Root')\n");
             sb.append("    cam_obj.constraints.clear()\n");
             sb.append("    cam_obj.animation_data_clear()\n");
             sb.append("    if _root:\n");
+            sb.append("        cam_obj.parent = _root\n");
+            sb.append("        cam_obj.location = (-3.8, -7.0, 2.2)\n");
             sb.append("        _tt = cam_obj.constraints.new(type='TRACK_TO')\n");
             sb.append("        _tt.target = _root\n");
             sb.append("        _tt.track_axis = 'TRACK_NEGATIVE_Z'\n");
             sb.append("        _tt.up_axis = 'UP_Y'\n");
-            sb.append("    cam_obj.location = (-2.8, 10.5, 0.95)\n");
-            sb.append("    cam_obj.keyframe_insert(data_path='location', frame=1)\n");
-            sb.append("    cam_obj.location = (-2.8, 85.5, 0.95)\n");
-            sb.append("    cam_obj.keyframe_insert(data_path='location', frame=60)\n");
-            sb.append("    if cam_obj.animation_data and cam_obj.animation_data.action:\n");
-            sb.append("        for _fc in cam_obj.animation_data.action.fcurves:\n");
-            sb.append("            for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n");
+            sb.append("    else:\n");
+            sb.append("        cam_obj.location = (-3.8, 0.0, 2.2)\n");
+            sb.append("        cam_obj.rotation_euler = (math.radians(68), 0, math.radians(-30))\n");
         } else {
             float[] camPos = (spec != null && spec.getCameraPosition() != null && spec.getCameraPosition().length >= 3)
                     ? spec.getCameraPosition() : new float[]{0.0f, -8.5f, 3.8f};
@@ -551,24 +551,32 @@ public class BlenderWorkerAgent {
         }
         sb.append("except Exception as ce: print(f'Camera warning: {ce}')\n\n");
 
-        // Natural Sunlight Rig
-        sb.append("# Natural Golden-Hour Sunlight\n");
+        // Natural Sunlight Rig & Ambient Sky Radiance
+        sb.append("# Natural Golden-Hour Sunlight & Ambient Sky Radiance\n");
         sb.append("try:\n");
         sb.append("    sun_data = bpy.data.lights.new('KeySun', type='SUN')\n");
         sb.append("    sun_data.energy = ").append(sunIntensity).append("\n");
+        sb.append("    sun_data.color = (1.0, 0.96, 0.90)\n");
         sb.append("    sun_obj = bpy.data.objects.new('KeySunLight', sun_data)\n");
         sb.append("    bpy.context.collection.objects.link(sun_obj)\n");
         sb.append("    sun_obj.rotation_euler = (math.radians(").append(sunElevation).append("), 0, math.radians(").append(sunAzimuth).append("))\n");
-        sb.append("except Exception as le: print(f'Sunlight warning: {le}')\n\n");
+        sb.append("    if bpy.context.scene.world and bpy.context.scene.world.node_tree:\n");
+        sb.append("        _bg = bpy.context.scene.world.node_tree.nodes.get('Background')\n");
+        sb.append("        if _bg:\n");
+        sb.append("            _bg.inputs['Color'].default_value = (0.65, 0.82, 1.0, 1.0)\n");
+        sb.append("            _bg.inputs['Strength'].default_value = 1.2\n");
+        sb.append("except Exception as le: print(f'Sunlight/Ambient warning: {le}')\n\n");
 
         // Render Configuration: Motion Blur & Shutter Speed
         sb.append("# Render Engine & Optical Motion Blur Configuration\n");
         sb.append("scene = bpy.context.scene\n");
         sb.append("scene.render.engine = 'CYCLES'\n");
         sb.append("scene.cycles.device = 'CPU'\n");
-        sb.append("scene.cycles.samples = 24\n");
-        sb.append("scene.render.resolution_x = 1080\n");
-        sb.append("scene.render.resolution_y = 1920\n"); // 9:16 Cinematic Vertical Reel Format
+        sb.append("scene.cycles.samples = 2\n");
+        sb.append("scene.cycles.max_bounces = 3\n");
+        sb.append("scene.cycles.use_denoising = False\n");
+        sb.append("scene.render.resolution_x = 960\n");
+        sb.append("scene.render.resolution_y = 540\n");
         sb.append("scene.render.fps = 30\n");
         sb.append("scene.frame_start = 1\n");
         sb.append("scene.frame_end = 60\n\n");
@@ -584,10 +592,13 @@ public class BlenderWorkerAgent {
         sb.append("    scene.view_settings.look = 'AgX - High Contrast'\n");
         sb.append("except Exception as ve: print(f'Color management note: {ve}')\n\n");
 
-        // Step 1: Export Interactive GLB
-        sb.append("# Step 1: Export Interactive 3D GLTF/GLB\n");
+        // Step 1: Export Interactive GLB (Always after Worker 2 road & car are committed)
+        sb.append("# Step 1: Export Interactive 3D GLTF/GLB (Includes Road, Car, and Kinematics)\n");
         sb.append("try:\n");
-        sb.append("    bpy.ops.export_scene.gltf(filepath='output/model.glb', export_format='GLB', export_skins=True, export_animations=True)\n");
+        sb.append("    for _o in list(bpy.data.objects):\n");
+        sb.append("        if _o.type == 'MESH' and any(_k in _o.name.lower() for _k in ['fog', 'volume', 'domain', 'atmosphere']):\n");
+        sb.append("            bpy.data.objects.remove(_o, do_unlink=True)\n");
+        sb.append("    bpy.ops.export_scene.gltf(filepath='output/model.glb', export_format='GLB', export_apply=False, export_skins=True, export_animations=True, export_materials='EXPORT')\n");
         sb.append("    print('GLB Export Successful: output/model.glb')\n");
         sb.append("except Exception as ge:\n");
         sb.append("    print(f'GLTF export warning: {ge}')\n");
@@ -608,7 +619,8 @@ public class BlenderWorkerAgent {
         sb.append("    scene.render.image_settings.file_format = 'FFMPEG'\n");
         sb.append("    scene.render.ffmpeg.format = 'MPEG4'\n");
         sb.append("    scene.render.ffmpeg.codec = 'H264'\n");
-        sb.append("    scene.render.ffmpeg.constant_rate_factor = 'HIGH'\n");
+        sb.append("    scene.render.ffmpeg.constant_rate_factor = 'MEDIUM'\n");
+        sb.append("    scene.render.ffmpeg.ffmpeg_preset = 'REALTIME'\n");
         sb.append("    scene.render.filepath = 'output/cinematic.mp4'\n");
         sb.append("    bpy.ops.render.render(animation=True)\n");
         sb.append("    print('Cinematic MP4 Video render complete: output/cinematic.mp4')\n");
