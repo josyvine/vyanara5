@@ -7,6 +7,7 @@ on:
 jobs:
   build_3d_asset:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout Code
@@ -487,10 +488,10 @@ jobs:
           else:
               bpy_script = bpy_script.replace("export_apply=True", "export_apply=False")
 
-          # Auto-Repair 11: Production Snapshot Framing (Always Single Frame Preview)
+          # Auto-Repair 11: Production Snapshot Framing (Always Single Frame Preview - Optimized for Headless CPU)
           if 'output/render.png' not in bpy_script:
               bpy_script += (
-                  "\n\n# Production Snapshot Frame\n"
+                  "\n\n# Production Snapshot Frame (Fast Headless Preview)\n"
                   "try:\n"
                   "    import os, math, bpy\n"
                   "    _cam = bpy.context.scene.camera\n"
@@ -503,10 +504,15 @@ jobs:
                   "        _cam.rotation_euler = (math.radians(70), 0, math.radians(-15))\n"
                   "    bpy.context.scene.render.engine = 'CYCLES'\n"
                   "    bpy.context.scene.cycles.device = 'CPU'\n"
-                  "    bpy.context.scene.cycles.samples = 16\n"
-                  "    bpy.context.scene.cycles.use_denoising = True\n"
-                  "    bpy.context.scene.render.resolution_x = 1280\n"
-                  "    bpy.context.scene.render.resolution_y = 720\n"
+                  "    bpy.context.scene.cycles.samples = 4\n"
+                  "    bpy.context.scene.cycles.max_bounces = 4\n"
+                  "    bpy.context.scene.cycles.diffuse_bounces = 2\n"
+                  "    bpy.context.scene.cycles.glossy_bounces = 2\n"
+                  "    bpy.context.scene.cycles.transmission_bounces = 2\n"
+                  "    bpy.context.scene.cycles.transparent_max_bounces = 4\n"
+                  "    bpy.context.scene.cycles.use_denoising = False\n"
+                  "    bpy.context.scene.render.resolution_x = 960\n"
+                  "    bpy.context.scene.render.resolution_y = 540\n"
                   "    bpy.context.scene.render.filepath = 'output/render.png'\n"
                   "    bpy.ops.render.render(write_still=True)\n"
                   "    print('Production Cycles snapshot complete: output/render.png')\n"
