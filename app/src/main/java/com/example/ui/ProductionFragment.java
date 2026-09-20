@@ -291,7 +291,7 @@ public class ProductionFragment extends Fragment {
                 traceback = "ExecutionTimeout or Headless Worker Error: Execution timed out or halted without an explicit Python traceback.";
             }
 
-            // 2. Resolve Script from all available sources (Task parameters, Operation params, Master script, or Cache file)
+            // 2. Resolve Script from Operation params, Master script, or local Cache file
             String failedScript = task.getRepairedScript();
 
             if (failedScript == null || failedScript.trim().isEmpty()) {
@@ -303,16 +303,6 @@ public class ProductionFragment extends Fragment {
                     if (scriptObj != null) {
                         failedScript = String.valueOf(scriptObj);
                     }
-                }
-            }
-
-            if (failedScript == null || failedScript.trim().isEmpty()) {
-                Object paramScript = task.getParameters().get("blender_script");
-                if (paramScript == null) {
-                    paramScript = task.getParameters().get("bpyScript");
-                }
-                if (paramScript != null) {
-                    failedScript = String.valueOf(paramScript);
                 }
             }
 
@@ -375,8 +365,6 @@ public class ProductionFragment extends Fragment {
                 task.getOperation().setParam("bpyScript", repairedScript);
                 task.getOperation().setParam("blender_script", repairedScript);
             }
-            task.addParameter("bpyScript", repairedScript);
-            task.addParameter("blender_script", repairedScript);
 
             ToolExecutor executor = controller.getToolExecutor() != null 
                     ? controller.getToolExecutor() 
