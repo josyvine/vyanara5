@@ -39,7 +39,7 @@ import okhttp3.ResponseBody;
 
 public class GitHubWorkflowBridge {
     private static final MediaType JSON_MEDIA_TYPE = MediaType.parse("application/json; charset=utf-8");
-    // Increased to 300 seconds (5 minutes) to comfortably handle multi-megabyte 3D model base64 payloads
+    // 300 seconds HTTP socket timeout for network resilience
     private static final int DEFAULT_TIMEOUT_SECONDS = 300;
     private static final long POLLING_INTERVAL_MS = 2500; // Optimized polling interval (2.5s)
     private static final long MAX_POLLING_DURATION_MS = 600000; // 10 minutes timeout (supports high-fidelity renders)
@@ -480,7 +480,10 @@ public class GitHubWorkflowBridge {
             try {
                 String b64Script = Base64.encodeToString(safeScript.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
                 clientPayload.put("bpy_script", "b64:" + b64Script);
-                clientPayload.put("bpy_script_b64", b64Script);
+                // Only populate secondary duplicate key if payload stays well within GitHub's 64KB API limit
+                if (b64Script.length() < 16000) {
+                    clientPayload.put("bpy_script_b64", b64Script);
+                }
             } catch (Exception e) {
                 clientPayload.put("bpy_script", safeScript);
             }
@@ -757,6 +760,7 @@ public class GitHubWorkflowBridge {
         }
 
         final long dispatchTimeMs = System.currentTimeMillis();
+        final long[] activeRunId = new long[]{-1};
         clearLastBlenderError();
         VynaraLogger.system("GitHubWorkflowBridge: Starting workflow execution monitoring for assetId: " + assetId);
 
@@ -765,8 +769,13 @@ public class GitHubWorkflowBridge {
             @Override
             public void run() {
                 if (System.currentTimeMillis() - dispatchTimeMs > MAX_POLLING_DURATION_MS) {
-                    VynaraLogger.e("GitHubWorkflowBridge: Workflow execution timed out after " + (MAX_POLLING_DURATION_MS / 1000) + "s");
-                    mainHandler.post(() -> callback.onError("GitHub Actions workflow execution timed out."));
+                    String timeoutMsg = "GitHub Actions workflow execution timed out after " + (MAX_POLLING_DURATION_MS / 1000) + "s.";
+                    sLastBlenderError = "TimeoutError: Script execution timed out after " + (MAX_POLLING_DURATION_MS / 1000) + "s";
+                    sLastBlenderTraceback = "TimeoutError: " + timeoutMsg + "\nHeadless Blender took too long executing procedural loops or GLTF export without completing.";
+                    VynaraLogger.e("GitHubWorkflowBridge: " + timeoutMsg);
+
+                    final long failedRunId = activeRunId[0];
+                    mainHandler.post(() -> callback.onScriptExecutionFailed(failedRunId, sLastBlenderTraceback));
                     return;
                 }
 
@@ -832,6 +841,7 @@ public class GitHubWorkflowBridge {
                                     String status = targetRun.optString("status", "unknown");
                                     String conclusion = targetRun.optString("conclusion", "null");
                                     long runId = targetRun.optLong("id", 0);
+                                    activeRunId[0] = runId;
 
                                     VynaraLogger.system("GitHubWorkflowBridge: Active Run #" + runId + " Status: " + status + " Conclusion: " + conclusion);
                                     mainHandler.post(() -> callback.onStatusUpdate(status, "Run #" + runId + " [" + status + "]"));
