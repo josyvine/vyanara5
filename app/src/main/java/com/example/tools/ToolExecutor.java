@@ -348,6 +348,12 @@ public class ToolExecutor {
                         try {
                             VynaraLogger.system("neural.image_to_3d: Importing synthesized 3D mesh into active scene viewport...");
                             GLTFImporter.ImportResult result = GLTFImporter.loadFromFile(downloadedGlbFile);
+                            
+                            // Reset canvas to eliminate residual stacked geometry
+                            engine.getSceneManager().getActiveScene().getObjects().clear();
+                            characterManager.getCharacterMap().clear();
+                            engine.getSceneManager().selectObject(null);
+
                             for (SceneObject obj : result.getSceneObjects()) {
                                 engine.getSceneManager().getActiveScene().addObject(obj);
                             }
@@ -398,6 +404,10 @@ public class ToolExecutor {
                 String pipelineModeStr = op.getStringParam("pipelineMode", AIPipelineMode.PROCEDURAL_PYTHON.getId());
                 AIPipelineMode activeMode = AIPipelineMode.fromDisplayNameSafe(pipelineModeStr);
 
+                boolean isRawScript = "true".equalsIgnoreCase(op.getStringParam("is_raw_script", "false"))
+                        || "true".equalsIgnoreCase(op.getStringParam("isRawUserScript", "false"))
+                        || (activeMode == AIPipelineMode.PROCEDURAL_PYTHON && !bpyScript.isEmpty() && !bpyScript.contains("Model_Root"));
+
                 // Resolve GitHub dispatch event type deterministically based on tool ID & mode
                 String eventType = activeMode.getGithubEventType();
                 if ("blender.agentic_autonomous".equals(id)) {
@@ -406,7 +416,12 @@ public class ToolExecutor {
                     eventType = "vynara_agentic_interactive";
                 }
 
-                VynaraLogger.system("Executing " + id + " [Mode: " + activeMode.getDisplayName() + ", Event: " + eventType + "]");
+                // If standalone raw procedural script, prepend metadata tag so worker skips car/highway logic
+                if (isRawScript && !bpyScript.startsWith("# VYNARA_PIPELINE:")) {
+                    bpyScript = "# VYNARA_PIPELINE: OPTION_A (is_raw_script=True)\n" + bpyScript;
+                }
+
+                VynaraLogger.system("Executing " + id + " [Mode: " + activeMode.getDisplayName() + ", Event: " + eventType + ", isRawScript=" + isRawScript + "]");
 
                 ApiKeyManager keyManager = ProjectRuntime.getInstance().getAIOrchestrator().getApiKeyManager();
                 CloudProvider provider = keyManager.getComputeProvider();
@@ -462,6 +477,11 @@ public class ToolExecutor {
                             @Override
                             public void onSuccess(File downloadedGlbFile) {
                                 try {
+                                    // Reset active scene to prevent previous geometry stacking
+                                    engine.getSceneManager().getActiveScene().getObjects().clear();
+                                    characterManager.getCharacterMap().clear();
+                                    engine.getSceneManager().selectObject(null);
+
                                     GLTFImporter.ImportResult result = GLTFImporter.loadFromFile(downloadedGlbFile);
                                     for (SceneObject obj : result.getSceneObjects()) {
                                         engine.getSceneManager().getActiveScene().addObject(obj);
@@ -517,6 +537,12 @@ public class ToolExecutor {
                                     public void onSuccess(File downloadedGlbFile) {
                                         try {
                                             VynaraLogger.system("Importing downloaded GLB into 3D scene engine...");
+                                            
+                                            // Reset active scene to prevent residual roads/geometry stacking
+                                            engine.getSceneManager().getActiveScene().getObjects().clear();
+                                            characterManager.getCharacterMap().clear();
+                                            engine.getSceneManager().selectObject(null);
+
                                             GLTFImporter.ImportResult result = GLTFImporter.loadFromFile(downloadedGlbFile);
                                             for (SceneObject obj : result.getSceneObjects()) {
                                                 engine.getSceneManager().getActiveScene().addObject(obj);
@@ -588,7 +614,8 @@ public class ToolExecutor {
                                 "2. Ensure all mesh operators use `bpy.ops.mesh.primitive_...` (never `_create` or `bpy.ops.object.mesh.`).\n" +
                                 "3. Ensure all lighting operators use `bpy.ops.object.light_add` (never `bpy.ops.light.add`).\n" +
                                 "4. In `bpy.data.textures.new(name, type=...)`, type MUST be one of ('NONE', 'BLEND', 'CLOUDS', 'DISTORTED_NOISE', 'IMAGE', 'MAGIC', 'MARBLE', 'MUSGRAVE', 'NOISE', 'STUCCI', 'VORONOI', 'WOOD'). Never invent unlisted types.\n" +
-                                "5. Preserve all original multi-part 3D geometry and materials.";
+                                "5. Preserve all original multi-part 3D geometry and materials.\n" +
+                                "6. If this is a standalone procedural script (Option A), DO NOT inject car roads, driving animations, or lane markings.";
 
                         String repairPrompt = "USER PROMPT: " + prompt + "\n\n" +
                                 "EXACT BLENDER TERMINAL ERROR / TRACEBACK:\n" + failureReason + "\n\n" +
