@@ -164,14 +164,15 @@ public class GitHubWorkflowBridge {
     }
 
     /**
-     * Directly dispatches custom uploaded .py scripts with prompt-free execution.
+     * Directly dispatches custom uploaded .py scripts with prompt-free execution (Option A).
      */
     public void dispatchCustomScriptWorkflow(Context context,
                                              String repository,
                                              String assetId,
                                              String customScript,
                                              WorkflowDispatchCallback callback) {
-        dispatchGenerationWorkflow(context, repository, "vynara_generate", assetId, customScript, callback);
+        String token = GitHubOAuthService.getAccessToken(context);
+        dispatchGenerationWorkflowWithModel(repository, token, "vynara_generate", assetId, customScript, null, true, "OPTION_A", callback);
     }
 
     public void dispatchModularGenerationWorkflow(Context context,
@@ -265,10 +266,6 @@ public class GitHubWorkflowBridge {
         dispatchGenerationWorkflowWithModel(repository, personalAccessToken, eventType, assetId, bpyScript, null, callback);
     }
 
-    /**
-     * Dispatches generation workflow. If an imported 3D model file exists (or is actively selected),
-     * it uploads the file to the repository via the GitHub Contents API before dispatching.
-     */
     public void dispatchGenerationWorkflowWithModel(String repository,
                                                     String personalAccessToken,
                                                     String eventType,
@@ -276,13 +273,33 @@ public class GitHubWorkflowBridge {
                                                     String bpyScript,
                                                     File inputModelFile,
                                                     WorkflowDispatchCallback callback) {
+        dispatchGenerationWorkflowWithModel(repository, personalAccessToken, eventType, assetId, bpyScript, inputModelFile, false, null, callback);
+    }
+
+    /**
+     * Overloaded method with explicit Option A / Raw Script isolation controls.
+     */
+    public void dispatchGenerationWorkflowWithModel(String repository,
+                                                    String personalAccessToken,
+                                                    String eventType,
+                                                    String assetId,
+                                                    String bpyScript,
+                                                    File inputModelFile,
+                                                    boolean isRawScript,
+                                                    String pipelineMode,
+                                                    WorkflowDispatchCallback callback) {
         if (repository == null || repository.trim().isEmpty() || personalAccessToken == null || personalAccessToken.trim().isEmpty()) {
             callback.onError("GitHub credentials are not properly configured.");
             return;
         }
 
-        // Check if an imported 3D model is active in ProjectRuntime if not passed explicitly
-        if (inputModelFile == null || !inputModelFile.exists()) {
+        // Auto-detect Option A raw script tags if passed in the script content
+        boolean isRaw = isRawScript || (bpyScript != null && (bpyScript.contains("is_raw_script=True") || bpyScript.startsWith("# VYNARA_PIPELINE: OPTION_A")));
+        String effectivePipelineMode = (pipelineMode != null && !pipelineMode.isEmpty()) ? pipelineMode : (isRaw ? "OPTION_A" : "PROCEDURAL_PYTHON");
+
+        // CRITICAL FIX: Only fallback to active selected asset if this is NOT a standalone raw procedural script.
+        // Bypasses residual 3D car models when the user is generating a clean procedural building or asset.
+        if (!isRaw && (inputModelFile == null || !inputModelFile.exists())) {
             try {
                 ProjectRuntime runtime = ProjectRuntime.getInstance();
                 if (runtime != null) {
@@ -297,12 +314,12 @@ public class GitHubWorkflowBridge {
             } catch (Throwable ignored) {}
         }
 
-        // If an imported 3D model exists on disk, upload to repository first (with duplicate hash bypass)
-        if (inputModelFile != null && inputModelFile.exists() && inputModelFile.length() > 0) {
-            uploadModelAndDispatch(repository, personalAccessToken, eventType, assetId, bpyScript, inputModelFile, callback);
+        // If an imported 3D model exists and is intentionally bound, upload to repository first
+        if (inputModelFile != null && inputModelFile.exists() && inputModelFile.length() > 0 && !isRaw) {
+            uploadModelAndDispatch(repository, personalAccessToken, eventType, assetId, bpyScript, inputModelFile, isRaw, effectivePipelineMode, callback);
         } else {
-            // Normal fast dispatch for text prompts or custom scripts
-            executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, null, callback);
+            // Fast direct dispatch for pure procedural code or prompt-based scenes
+            executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, null, isRaw, effectivePipelineMode, callback);
         }
     }
 
@@ -317,6 +334,8 @@ public class GitHubWorkflowBridge {
                                         String assetId,
                                         String bpyScript,
                                         File modelFile,
+                                        boolean isRawScript,
+                                        String pipelineMode,
                                         WorkflowDispatchCallback callback) {
         String ext = ".glb";
         String origName = modelFile.getName().toLowerCase(Locale.US);
@@ -342,7 +361,7 @@ public class GitHubWorkflowBridge {
             @Override
             public void onFailure(Call call, IOException e) {
                 // If lookup fails due to network, attempt direct upload
-                performPutModel(repository, personalAccessToken, eventType, assetId, bpyScript, modelFile, targetPath, null, callback);
+                performPutModel(repository, personalAccessToken, eventType, assetId, bpyScript, modelFile, targetPath, null, isRawScript, pipelineMode, callback);
             }
 
             @Override
@@ -364,10 +383,10 @@ public class GitHubWorkflowBridge {
                         && existingSha.equalsIgnoreCase(localGitBlobSha) 
                         && remoteSize == modelFile.length()) {
                     VynaraLogger.system("GitHubWorkflowBridge: 3D model already synced in repository (" + modelFile.length() + " bytes). Bypassing redundant upload.");
-                    executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, targetPath, callback);
+                    executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, targetPath, isRawScript, pipelineMode, callback);
                 } else {
                     VynaraLogger.system("GitHubWorkflowBridge: Uploading 3D asset (" + modelFile.length() + " bytes) to repository: " + targetPath);
-                    performPutModel(repository, personalAccessToken, eventType, assetId, bpyScript, modelFile, targetPath, existingSha, callback);
+                    performPutModel(repository, personalAccessToken, eventType, assetId, bpyScript, modelFile, targetPath, existingSha, isRawScript, pipelineMode, callback);
                 }
             }
         });
@@ -381,6 +400,8 @@ public class GitHubWorkflowBridge {
                                  File modelFile,
                                  String targetPath,
                                  String existingSha,
+                                 boolean isRawScript,
+                                 String pipelineMode,
                                  WorkflowDispatchCallback callback) {
         try {
             byte[] fileBytes = new byte[(int) modelFile.length()];
@@ -422,7 +443,7 @@ public class GitHubWorkflowBridge {
                     try {
                         if (response.isSuccessful() || response.code() == 200 || response.code() == 201) {
                             VynaraLogger.system("GitHubWorkflowBridge: Successfully uploaded 3D model to repository (" + targetPath + ")");
-                            executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, targetPath, callback);
+                            executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, targetPath, isRawScript, pipelineMode, callback);
                         } else {
                             String err = "Model upload rejected by GitHub [HTTP " + response.code() + "]: " + response.message();
                             VynaraLogger.e("GitHubWorkflowBridge: " + err);
@@ -446,6 +467,8 @@ public class GitHubWorkflowBridge {
                                      String assetId,
                                      String bpyScript,
                                      String uploadedModelPath,
+                                     boolean isRawScript,
+                                     String pipelineMode,
                                      WorkflowDispatchCallback callback) {
         String dispatchUrl = "https://api.github.com/repos/" + repository.trim() + "/dispatches";
 
@@ -466,6 +489,15 @@ public class GitHubWorkflowBridge {
                 clientPayload.put("model_path", uploadedModelPath);
             }
 
+            if (isRawScript) {
+                clientPayload.put("is_raw_script", true);
+                clientPayload.put("isRawUserScript", true);
+            }
+
+            if (pipelineMode != null && !pipelineMode.isEmpty()) {
+                clientPayload.put("pipeline_mode", pipelineMode);
+            }
+
             clientPayload.put("timestamp", System.currentTimeMillis());
 
             JSONObject rootPayload = new JSONObject();
@@ -482,7 +514,7 @@ public class GitHubWorkflowBridge {
                     .post(body)
                     .build();
 
-            VynaraLogger.system("GitHubWorkflowBridge: Dispatching workflow to: " + dispatchUrl + " with assetId: " + assetId);
+            VynaraLogger.system("GitHubWorkflowBridge: Dispatching workflow to: " + dispatchUrl + " with assetId: " + assetId + " (isRawScript=" + isRawScript + ")");
 
             httpClient.newCall(request).enqueue(new Callback() {
                 @Override
