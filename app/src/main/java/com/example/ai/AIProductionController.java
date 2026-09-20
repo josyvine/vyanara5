@@ -252,10 +252,10 @@ public class AIProductionController {
         }
 
         // =========================================================================
-        // PIPELINE OPTION A: PROCEDURAL PYTHON SCRIPT (YOUR EXISTING METHOD - UNTOUCHED)
+        // PIPELINE OPTION A: PROCEDURAL PYTHON SCRIPT (STANDALONE SCRIPT UPLOAD)
         // =========================================================================
         if (customScriptPath != null) {
-            VynaraLogger.system("AIProductionController: [OPTION A] Custom Python script detected [" + customScriptPath + "]. Bypassing Gemini planning.");
+            VynaraLogger.system("AIProductionController: [OPTION A] Custom Python script detected [" + customScriptPath + "]. Direct dispatch mode.");
             ProductionPlan scriptPlan = orchestrator.planProduction(userPrompt, style, engine, resolvedUris);
             if (scriptPlan != null && scriptPlan.getTaskGraph() != null) {
                 String scriptText = readScriptContent(customScriptPath);
@@ -379,12 +379,24 @@ public class AIProductionController {
         return aiCorrector.critiqueAndRefineBlenderScriptSync(userPrompt, currentScript, referenceImageFile, renderPreviewFile);
     }
 
+    /**
+     * Injects the raw user script cleanly into the task graph.
+     * Marks execution parameters with is_raw_script=true, isRawUserScript=true, and pipelineMode=OPTION_A,
+     * ensuring the cloud worker does not force vehicle road generators or 60-frame animation loops.
+     */
     private void injectCustomScriptIntoPlan(ProductionPlan plan, String scriptText) {
         if (plan == null || plan.getTaskGraph() == null || scriptText == null || scriptText.isEmpty()) return;
         for (TaskNode node : plan.getTaskGraph().getAllNodes()) {
             if (node.getOperation() != null && "blender.cloud_generate".equals(node.getOperation().getToolId())) {
                 node.getOperation().setParam("bpyScript", scriptText);
-                VynaraLogger.system("AIProductionController: Injected custom Python script into task [" + node.getId() + "]");
+                node.getOperation().setParam("is_raw_script", true);
+                node.getOperation().setParam("isRawUserScript", true);
+                node.getOperation().setParam("pipelineMode", AIPipelineMode.PROCEDURAL_PYTHON.getId());
+                node.getOperation().setParam("agenticMode", false);
+                node.getOperation().setParam("interactiveCheckpoint", false);
+                node.setTitle("Execute Procedural Python Script");
+                node.setDescription("Executing standalone procedural Blender script without scene injection");
+                VynaraLogger.system("AIProductionController: Injected raw procedural Python script into task [" + node.getId() + "] (is_raw_script=true)");
             }
         }
     }
